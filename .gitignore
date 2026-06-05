@@ -1,0 +1,10 @@
+docker-compose.yml
+main2.py
+venv/*
+__pycache__/
+*.pyc
+*.jpg
+data/
+config.json
+score_history.json
+.env

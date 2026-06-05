@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Garage Monitor</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='8' width='20' height='14' rx='1' fill='%233b82f6'/%3E%3Cpath d='M4 8V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v3' fill='%231d4ed8'/%3E%3Cline x1='6' y1='12' x2='18' y2='12' stroke='white' stroke-width='1.5'/%3E%3Cline x1='6' y1='15' x2='18' y2='15' stroke='white' stroke-width='1.5'/%3E%3Cline x1='6' y1='18' x2='18' y2='18' stroke='white' stroke-width='1.5'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <rect x="2" y="8" width="20" height="13" rx="1.5"/>
+          <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v2"/>
+          <line x1="6" y1="12" x2="18" y2="12"/>
+          <line x1="6" y1="15" x2="18" y2="15"/>
+          <line x1="6" y1="18" x2="18" y2="18"/>
+        </svg>
+        <span class="brand-name">Garage Monitor</span>
+      </div>
+      <div class="header-status">
+        <span id="header-badge" class="status-badge badge-unknown">●&nbsp;Unknown</span>
+        <button id="monitor-toggle" class="btn btn-sm btn-outline" onclick="toggleMonitor()">
+          <span id="monitor-toggle-label">Start</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 10a8 8 0 1 1 16 0A8 8 0 0 1 2 10Zm8-4a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/></svg>
+      Dashboard
+    </button>
+    <button class="tab-btn" data-tab="setup" onclick="switchTab('setup')">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M1 8a2 2 0 0 1 2-2h.93a2 2 0 0 0 1.664-.89l.812-1.22A2 2 0 0 1 8.07 3h3.86a2 2 0 0 1 1.664.89l.812 1.22A2 2 0 0 0 16.07 6H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8Zm13.5 3a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM10 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/></svg>
+      Setup
+    </button>
+    <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.992 6.992 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/></svg>
+      Settings
+    </button>
+  </nav>
+
+  <main class="main-content">
+
+    <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
+    <section id="tab-dashboard" class="tab-section active">
+      <div class="dashboard-grid">
+
+        <div class="card status-card" id="status-card">
+          <div class="status-icon-wrap" id="status-icon-wrap">
+            <!-- door closed icon -->
+            <svg id="icon-closed" class="door-icon" viewBox="0 0 64 64" fill="none">
+              <rect x="10" y="6" width="44" height="52" rx="3" stroke="currentColor" stroke-width="3"/>
+              <line x1="18" y1="20" x2="46" y2="20" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <line x1="18" y1="28" x2="46" y2="28" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <line x1="18" y1="36" x2="46" y2="36" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <line x1="18" y1="44" x2="46" y2="44" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <circle cx="44" cy="34" r="2.5" fill="currentColor"/>
+            </svg>
+            <!-- door open icon -->
+            <svg id="icon-open" class="door-icon hidden" viewBox="0 0 64 64" fill="none">
+              <path d="M10 8 L10 56 L32 52 L32 12 Z" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+              <line x1="32" y1="8" x2="32" y2="56" stroke="currentColor" stroke-width="2.5"/>
+              <circle cx="29" cy="32" r="2.5" fill="currentColor"/>
+            </svg>
+            <!-- unknown icon -->
+            <svg id="icon-unknown" class="door-icon" viewBox="0 0 64 64" fill="none">
+              <circle cx="32" cy="32" r="22" stroke="currentColor" stroke-width="3"/>
+              <text x="32" y="40" text-anchor="middle" font-size="28" fill="currentColor" font-family="sans-serif">?</text>
+            </svg>
+          </div>
+          <div class="status-label" id="status-label">Unknown</div>
+          <div class="status-time" id="status-time">—</div>
+          <div id="error-banner" class="error-banner hidden"></div>
+        </div>
+
+        <div class="card scores-card">
+          <h3 class="card-title">Confidence Scores</h3>
+          <div class="score-row">
+            <span class="score-name">Closed</span>
+            <div class="score-bar-wrap">
+              <div class="score-bar score-bar-closed" id="bar-closed" style="width:0%"></div>
+            </div>
+            <span class="score-val" id="val-closed">—</span>
+          </div>
+          <div class="score-row">
+            <span class="score-name">Open</span>
+            <div class="score-bar-wrap">
+              <div class="score-bar score-bar-open" id="bar-open" style="width:0%"></div>
+            </div>
+            <span class="score-val" id="val-open">—</span>
+          </div>
+          <div class="threshold-line" id="threshold-note"></div>
+        </div>
+
+        <div class="card feed-card">
+          <div class="card-header">
+            <h3 class="card-title">Live Feed</h3>
+            <button class="btn btn-xs btn-ghost" onclick="refreshFeed()">↺ Refresh</button>
+          </div>
+          <div class="feed-wrap">
+            <img id="live-feed" src="" alt="Live feed" class="feed-img" />
+            <div id="feed-placeholder" class="feed-placeholder">
+              <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="4" y="10" width="40" height="28" rx="3"/>
+                <circle cx="24" cy="24" r="7"/>
+              </svg>
+              <p>No frame yet — start monitoring to capture.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card history-card">
+          <h3 class="card-title">Event Log</h3>
+          <div class="history-list" id="history-list">
+            <p class="empty-state">No events yet.</p>
+          </div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-header">
+            <h3 class="card-title">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 11a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-5ZM8 7a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V7ZM14 4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V4Z"/></svg>
+              Confidence Score
+            </h3>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="legend-dot" style="background:var(--closed)"></span>Closed</span>
+              <span class="legend-item"><span class="legend-dot" style="background:var(--open)"></span>Open</span>
+              <span class="legend-item"><span class="legend-dot" style="background:rgba(239,68,68,.6);border-radius:2px;width:14px;height:2px"></span>Threshold</span>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="score-chart"></canvas>
+            <div class="chart-empty" id="chart-empty">Start monitoring to see data.</div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── SETUP ─────────────────────────────────────────────────────────── -->
+    <section id="tab-setup" class="tab-section">
+      <div class="setup-intro">
+        <p>Capture or upload a reference image for each door state, then define the crop region the monitor will analyse.</p>
+      </div>
+
+      <div class="ref-grid">
+        <!-- Closed reference -->
+        <div class="card ref-card" id="ref-card-closed">
+          <div class="ref-header">
+            <span class="ref-dot dot-closed"></span>
+            <h3>Closed Reference</h3>
+          </div>
+          <div class="ref-preview-wrap" id="preview-wrap-closed">
+            <img id="ref-preview-closed" class="ref-preview hidden" alt="Closed reference" />
+            <div id="ref-placeholder-closed" class="ref-placeholder">
+              <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="10" width="40" height="28" rx="3"/><circle cx="24" cy="24" r="7"/></svg>
+              <p>No image set</p>
+            </div>
+          </div>
+          <div class="ref-actions">
+            <button class="btn btn-primary btn-sm" onclick="captureRef('closed')">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M1 8a2 2 0 0 1 2-2h.93a2 2 0 0 0 1.664-.89l.812-1.22A2 2 0 0 1 8.07 3h3.86a2 2 0 0 1 1.664.89l.812 1.22A2 2 0 0 0 16.07 6H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8Zm13.5 3a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM10 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/></svg>
+              Capture from Camera
+            </button>
+            <label class="btn btn-outline btn-sm" for="upload-closed">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9.25 13.25a.75.75 0 0 0 1.5 0V4.636l2.955 3.129a.75.75 0 0 0 1.09-1.03l-4.25-4.5a.75.75 0 0 0-1.09 0l-4.25 4.5a.75.75 0 1 0 1.09 1.03L9.25 4.636v8.614Z"/><path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z"/></svg>
+              Upload Image
+            </label>
+            <input type="file" id="upload-closed" accept="image/*" class="hidden" onchange="uploadRef('closed', this)" />
+          </div>
+        </div>
+
+        <!-- Open reference -->
+        <div class="card ref-card" id="ref-card-open">
+          <div class="ref-header">
+            <span class="ref-dot dot-open"></span>
+            <h3>Open Reference</h3>
+          </div>
+          <div class="ref-preview-wrap" id="preview-wrap-open">
+            <img id="ref-preview-open" class="ref-preview hidden" alt="Open reference" />
+            <div id="ref-placeholder-open" class="ref-placeholder">
+              <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="10" width="40" height="28" rx="3"/><circle cx="24" cy="24" r="7"/></svg>
+              <p>No image set</p>
+            </div>
+          </div>
+          <div class="ref-actions">
+            <button class="btn btn-primary btn-sm" onclick="captureRef('open')">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M1 8a2 2 0 0 1 2-2h.93a2 2 0 0 0 1.664-.89l.812-1.22A2 2 0 0 1 8.07 3h3.86a2 2 0 0 1 1.664.89l.812 1.22A2 2 0 0 0 16.07 6H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8Zm13.5 3a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM10 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/></svg>
+              Capture from Camera
+            </button>
+            <label class="btn btn-outline btn-sm" for="upload-open">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9.25 13.25a.75.75 0 0 0 1.5 0V4.636l2.955 3.129a.75.75 0 0 0 1.09-1.03l-4.25-4.5a.75.75 0 0 0-1.09 0l-4.25 4.5a.75.75 0 1 0 1.09 1.03L9.25 4.636v8.614Z"/><path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z"/></svg>
+              Upload Image
+            </label>
+            <input type="file" id="upload-open" accept="image/*" class="hidden" onchange="uploadRef('open', this)" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Crop tool -->
+      <div class="card crop-card" id="crop-card">
+        <div class="card-header">
+          <h3 class="card-title">Crop Region</h3>
+          <span class="card-subtitle">Select the area the algorithm will compare — focus on the door panel itself.</span>
+        </div>
+
+        <div class="crop-source-selector">
+          <span class="label-sm">Crop on:</span>
+          <button class="btn btn-sm btn-outline active" id="crop-src-closed" onclick="loadCropImage('closed')">Closed ref</button>
+          <button class="btn btn-sm btn-outline" id="crop-src-open" onclick="loadCropImage('open')">Open ref</button>
+        </div>
+
+        <div class="crop-container-wrap" id="crop-container-wrap">
+          <div class="crop-placeholder" id="crop-placeholder">
+            <p>Capture or upload at least one reference image to enable the crop tool.</p>
+          </div>
+          <img id="crop-image" class="hidden" alt="Crop target" />
+        </div>
+
+        <div class="crop-coords" id="crop-coords">
+          <div class="coord-item"><span>X</span><strong id="coord-x">—</strong></div>
+          <div class="coord-item"><span>Y</span><strong id="coord-y">—</strong></div>
+          <div class="coord-item"><span>W</span><strong id="coord-w">—</strong></div>
+          <div class="coord-item"><span>H</span><strong id="coord-h">—</strong></div>
+        </div>
+
+        <div class="crop-actions-row">
+          <button class="btn btn-ghost btn-sm" onclick="resetCrop()">Reset to full frame</button>
+          <button class="btn btn-primary" id="apply-crop-btn" onclick="applyCrop()" disabled>Apply Crop</button>
+        </div>
+
+        <div id="crop-previews" class="crop-previews hidden">
+          <h4>After crop &amp; processing:</h4>
+          <div class="crop-preview-pair">
+            <div class="crop-preview-item">
+              <span>Closed</span>
+              <img id="crop-preview-closed" alt="Closed processed" />
+            </div>
+            <div class="crop-preview-item">
+              <span>Open</span>
+              <img id="crop-preview-open" alt="Open processed" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── SETTINGS ──────────────────────────────────────────────────────── -->
+    <section id="tab-settings" class="tab-section">
+      <form id="settings-form" onsubmit="saveSettings(event)" autocomplete="off">
+
+        <div class="card settings-card">
+          <h3 class="card-title">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M1 8a2 2 0 0 1 2-2h.93a2 2 0 0 0 1.664-.89l.812-1.22A2 2 0 0 1 8.07 3h3.86a2 2 0 0 1 1.664.89l.812 1.22A2 2 0 0 0 16.07 6H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8Zm13.5 3a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM10 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/></svg>
+            Camera
+          </h3>
+          <div class="field">
+            <label for="rtsp_url">RTSP Stream URL</label>
+            <div class="input-group">
+              <input type="text" id="rtsp_url" name="rtsp_url" placeholder="rtsp://user:pass@192.168.1.x/stream" spellcheck="false" />
+              <button type="button" class="btn btn-outline" onclick="testRtsp()">Test</button>
+            </div>
+            <p id="rtsp-test-result" class="test-result"></p>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <h3 class="card-title">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M16.364 3.636a9 9 0 0 1 0 12.728A9.001 9.001 0 0 1 2.93 5.501l1.423 1.423a7 7 0 1 0 9.9 9.9l1.423 1.423a9 9 0 0 1-12.728 0 9 9 0 0 1 0-12.728l1.42 1.42A7 7 0 1 0 14.94 5.058l1.423-1.422ZM12 10a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"/></svg>
+            MQTT <span class="card-title-note">(optional)</span>
+          </h3>
+          <div class="field-row">
+            <div class="field field-grow">
+              <label for="mqtt_broker">Broker Host</label>
+              <input type="text" id="mqtt_broker" name="mqtt_broker" placeholder="192.168.1.x or homeassistant.local" spellcheck="false" />
+            </div>
+            <div class="field field-sm">
+              <label for="mqtt_port">Port</label>
+              <input type="number" id="mqtt_port" name="mqtt_port" value="1883" min="1" max="65535" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="mqtt_user">Username</label>
+              <input type="text" id="mqtt_user" name="mqtt_user" autocomplete="off" />
+            </div>
+            <div class="field field-half">
+              <label for="mqtt_password">Password</label>
+              <input type="password" id="mqtt_password" name="mqtt_password" autocomplete="new-password" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="mqtt_topic">Topic</label>
+            <input type="text" id="mqtt_topic" name="mqtt_topic" placeholder="garage/status" spellcheck="false" />
+          </div>
+          <div class="field-action">
+            <button type="button" class="btn btn-outline btn-sm" onclick="testMqtt()">Test Connection</button>
+            <span id="mqtt-test-result" class="test-result"></span>
+          </div>
+          <div class="field-action">
+            <button type="button" class="btn btn-outline btn-sm" onclick="registerHomeAssistant()">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9.293 2.293a1 1 0 0 1 1.414 0l7 7A1 1 0 0 1 17 11h-1v6a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-3H9v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6H3a1 1 0 0 1-.707-1.707l7-7Z" clip-rule="evenodd"/></svg>
+              Add to Home Assistant
+            </button>
+            <span id="ha-discover-result" class="test-result"></span>
+          </div>
+          <p class="field-hint">Registers a garage-door sensor in Home Assistant via MQTT discovery. Requires MQTT enabled in Home Assistant.</p>
+        </div>
+
+        <div class="card settings-card">
+          <h3 class="card-title">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clip-rule="evenodd"/></svg>
+            Monitor
+          </h3>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="check_interval">Check Interval (s)</label>
+              <input type="number" id="check_interval" name="check_interval" value="10" min="1" max="3600" />
+            </div>
+            <div class="field field-half">
+              <label for="ssim_threshold">
+                SSIM Threshold
+                <span class="tooltip" title="Scores below this on both states are considered uncertain (0.0–1.0). Default: 0.4">?</span>
+              </label>
+              <input type="number" id="ssim_threshold" name="ssim_threshold" value="0.4" min="0" max="1" step="0.01" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="score_history_size">
+                Chart History Points
+                <span class="tooltip" title="How many of the most recent confidence readings to keep and plot on the dashboard chart. Persists across reloads. Default: 60">?</span>
+              </label>
+              <input type="number" id="score_history_size" name="score_history_size" value="60" min="1" max="1000" step="1" />
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <button type="submit" class="btn btn-primary btn-lg">Save Settings</button>
+          <p id="save-result" class="test-result"></p>
+        </div>
+
+      </form>
+    </section>
+
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://unpkg.com/cropperjs@1.6.2/dist/cropper.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

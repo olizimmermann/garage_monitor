@@ -1,0 +1,15 @@
+services:
+  garage-monitor:
+    build: .
+    container_name: garage-monitor
+    env_file:
+      - .env
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
