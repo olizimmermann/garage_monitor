@@ -14,6 +14,10 @@ home-automation platform.
 A built-in web dashboard handles the whole setup: capture reference images, draw a
 crop box over the door, tune the match threshold, and watch live confidence scores.
 
+Example dashboard view:
+
+![Dashboard screenshot showing door status, confidence bars, score chart, and event history](./images/Garage_Monitor.png)
+
 ## How it works
 
 1. You capture two reference images — the door **closed** and **open**.
