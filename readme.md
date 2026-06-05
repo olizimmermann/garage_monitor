@@ -169,6 +169,12 @@ uvicorn main:app --reload --port 8080
 Requires `ffmpeg` and OpenCV's runtime libs (`libgl1`, `libglib2.0-0`) on the host —
 see the `Dockerfile` for the exact packages.
 
+## ⭐ Like this project?
+
+If this saved you time, please consider giving it a star on GitHub — it helps others find the project and motivates further development!
+
+[![Star on GitHub](https://img.shields.io/github/stars/olizimmermann/garage_monitor?style=social)](https://github.com/olizimmermann/garage_monitor)
+
 ## Contributing
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the
