@@ -13,6 +13,8 @@ home-automation platform.
 
 A built-in web dashboard handles the whole setup: capture reference images, draw a
 crop box over the door, tune the match threshold, and watch live confidence scores.
+Optionally, a local vision model (via [Ollama](https://ollama.com)) gives a second
+opinion when the image match is unsure.
 
 Example dashboard view:
 
@@ -28,12 +30,10 @@ Example dashboard view:
    contrast normalization (so lighting changes don't fool it), and computes the
    [SSIM](https://en.wikipedia.org/wiki/Structural_similarity) structural similarity
    against each reference. The higher score wins.
-4. The state is published to MQTT (retained) and pushed live to the dashboard over a
+4. If the match is unsure, the optional [AI second opinion](#ai-second-opinion-ollama)
+   is consulted; otherwise the safety rule below applies.
+5. The state is published to MQTT (retained) and pushed live to the dashboard over a
    WebSocket.
-
-**Optional AI second opinion:** point the app at a local [Ollama](https://ollama.com)
-server with a vision model and it will ask the model — only when SSIM can't decide —
-whether the door is open. See [AI second opinion](#ai-second-opinion-ollama).
 
 **Safety-first low-confidence handling:** if neither reference matches above the
 configured threshold for two consecutive cycles, the door is reported as **open**.
@@ -49,10 +49,11 @@ to open rather than to a false "closed".
 - 🔒 Optional HTTP Basic auth for the dashboard and API
 - 🔀 MQTT publishing with retained state (Home Assistant ready)
 - 🏠 One-click Home Assistant registration via MQTT auto-discovery
-- 📊 Live dashboard: status badge, confidence bars, score chart, event history
+- 📊 Live dashboard: status badge, confidence bars, score chart, event history, and
+  how each state was decided (image match, AI, or safety fallback)
 - 💾 Persistent confidence history — the chart survives reloads and restarts
 - 🛠️ Browser-based setup — capture, upload, crop, and test connections in the UI
-- 🐳 Single-container Docker deployment
+- 🐳 Single-container Docker deployment, unprivileged user, built-in healthcheck
 
 ## Quick start (Docker Compose)
 
@@ -76,7 +77,15 @@ to open rather than to a false "closed".
    MQTT_USER=mqtt_user
    MQTT_PASSWORD=changeme
    MQTT_TOPIC=garage/status
+
+   # Recommended: protect the dashboard with a login
+   WEB_USERNAME=admin
+   WEB_PASSWORD=pick-a-strong-password
    ```
+
+   Only `RTSP_URL` is required — MQTT, login and the
+   [AI second opinion](#ai-second-opinion-ollama) are optional. See
+   [`.env.example`](.env.example) for every option.
 
 3. Build and start:
 
@@ -85,17 +94,26 @@ to open rather than to a false "closed".
    ```
 
 4. Open the dashboard at **http://localhost:8088** and complete the **Setup** tab:
-   capture/upload the closed and open reference images, draw the crop box, then start
-   monitoring.
+   capture/upload the closed and open reference images, draw the crop box, then
+   press **Start**. From then on monitoring starts automatically with the container.
 
 Settings and reference images persist in the `./data` volume, so they survive
 restarts and image rebuilds.
+
+**Tip:** take the reference images in typical conditions, and retake them when the
+garage changes noticeably (new objects, moved camera). A tight crop around the door
+itself makes the match far more robust to everything else in the scene.
 
 ## Configuration
 
 All settings can be edited live in the dashboard's **Settings** tab; they're written
 to `data/config.json`. On first run, the values below seed the defaults from
 environment variables.
+
+> **Note:** environment variables are only read while `data/config.json` doesn't
+> exist yet. After that, change settings in the dashboard — editing `.env` has no
+> effect, except for `WEB_USERNAME` / `WEB_PASSWORD`, which are always read from
+> the environment.
 
 | Variable / setting | Default          | Description                                                        |
 | ------------------ | ---------------- | ------------------------------------------------------------------ |
@@ -201,7 +219,9 @@ mqtt:
 
 ## API
 
-The dashboard is a single-page app backed by a small FastAPI service:
+The dashboard is a single-page app backed by a small FastAPI service. When login is
+enabled, every endpoint except `/healthz` requires HTTP Basic auth (scripts can
+send it with `curl -u user:pass …`):
 
 | Method | Path                       | Purpose                              |
 | ------ | -------------------------- | ------------------------------------ |
@@ -228,6 +248,43 @@ The dashboard is a single-page app backed by a small FastAPI service:
 
 `{state}` is `closed` or `open`.
 
+## Security
+
+- **Login is off by default.** Anyone who can reach the port can view the camera and
+  change settings. Set `WEB_USERNAME` / `WEB_PASSWORD` and keep the dashboard on a
+  trusted network; use a VPN or a TLS reverse proxy for remote access — never expose
+  the port directly to the internet.
+- Secrets live in `.env` and `data/config.json`, both git-ignored. The MQTT password
+  is never sent to the browser.
+- With the AI second opinion enabled, camera frames are sent to your Ollama server.
+  Only point it at a machine you control.
+
+See [SECURITY.md](SECURITY.md) for details and how to report a vulnerability.
+
+## Upgrading
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+Your settings and reference images in `./data` are kept. Since the new AI settings
+default to *off*, existing installs behave exactly as before until you enable them.
+
+Older versions ran the container as root. The container now runs as an unprivileged
+user and fixes the ownership of `./data` automatically on start, so files there will
+show up as owned by uid `10001` on the host.
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+| ------- | ------------------ |
+| Dashboard loads but never updates, **Start** seems to do nothing | The live-status WebSocket (`/ws`) is blocked. Behind a reverse proxy, enable WebSocket forwarding (`Upgrade`/`Connection` headers). Reload the page after logging in. |
+| "Failed to grab frame from RTSP stream" | Check the URL with **Settings ▸ Test**. The app uses RTSP over TCP; some cameras need a sub-stream path. |
+| Door often reported *open* via "safety fallback" | Neither reference matches well. Retake references, tighten the crop, or enable the AI second opinion. |
+| Score history or settings not saved | `./data` isn't writable — check the volume mount. |
+| AI card shows "Ollama unreachable" | Check the URL from the container's point of view (not `localhost`), and that Ollama listens on the network (`OLLAMA_HOST=0.0.0.0`). |
+
 ## Local development
 
 ```bash
@@ -238,7 +295,8 @@ uvicorn main:app --reload --port 8080
 ```
 
 Requires `ffmpeg` and OpenCV's runtime libs (`libgl1`, `libglib2.0-0`) on the host —
-see the `Dockerfile` for the exact packages.
+see the `Dockerfile` for the exact packages. Data is stored in the current directory
+unless you set `DATA_DIR`.
 
 ## ⭐ Like this project?
 
