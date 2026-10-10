@@ -6,7 +6,9 @@ let cropImageLoaded = false;
 let currentCropSource = 'closed';
 let ws = null;
 let feedInterval = null;
-let lastHistoryLength = 0;
+let lastHistoryKey = '';
+let llmMode = 'off';
+let lastSuggestionTs = null;
 let chart = null;
 let chartThreshold = 0.4;
 const scorePoints = [];
@@ -165,6 +167,13 @@ function refreshCropTool() {
   }
 }
 
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+const SOURCE_LABELS = { ssim: 'via image match', llm: 'via AI', fallback: 'safety fallback' };
+
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg, type = '') {
   const el = document.getElementById('toast');
@@ -223,11 +232,25 @@ function applyStatus(s) {
   if (s.error) { err.textContent = s.error; err.classList.remove('hidden'); }
   else         { err.classList.add('hidden'); }
 
-  // History
-  if (s.history && s.history.length !== lastHistoryLength) {
-    lastHistoryLength = s.history.length;
-    renderHistory(s.history);
+  // Decision source
+  const src = document.getElementById('status-source');
+  if (s.source && s.state !== 'unknown') {
+    src.textContent = SOURCE_LABELS[s.source] || s.source;
+    src.className = `status-source src-${s.source}`;
+  } else {
+    src.className = 'status-source hidden';
   }
+
+  // History — keyed on the newest entry, since the server caps the list length
+  const hist = s.history || [];
+  const key = hist.length + ':' + (hist.length ? hist[hist.length - 1].ts : '');
+  if (key !== lastHistoryKey) {
+    lastHistoryKey = key;
+    renderHistory(hist);
+  }
+
+  renderAi(s.llm);
+  renderSuggestion(s.suggestion);
 
   // Auto-refresh feed if monitoring
   if (s.running) scheduleFeedRefresh();
@@ -254,6 +277,7 @@ function renderHistory(history) {
     <div class="history-item">
       <span class="history-dot dot-${h.state}"></span>
       <span class="history-state" style="color:var(--${h.state === 'closed' ? 'closed' : h.state === 'open' ? 'open' : 'unknown'})">${h.state}</span>
+      ${h.source && h.source !== 'ssim' ? `<span class="history-source">${escapeHtml(SOURCE_LABELS[h.source] || h.source)}</span>` : ''}
       <span class="history-scores">c=${h.score_closed.toFixed(3)} o=${h.score_open.toFixed(3)}</span>
       <span class="history-time">${formatTs(h.ts)}</span>
     </div>
@@ -442,10 +466,17 @@ async function loadSettings() {
   if (!res.ok) return;
   const cfg = await res.json();
   const form = document.getElementById('settings-form');
+  // The saved model may not be in the dropdown until models are loaded
+  if (cfg.llm_model) ensureModelOption(cfg.llm_model);
   Object.keys(cfg).forEach(k => {
     const el = form.elements[k];
     if (el) el.value = cfg[k];
   });
+  // The server never returns the stored password; blank means "keep it"
+  form.elements.mqtt_password.placeholder =
+    cfg.mqtt_password_set ? '•••••••• (unchanged — type to replace)' : '';
+  llmMode = cfg.llm_mode || 'off';
+  document.getElementById('ai-card').classList.toggle('hidden', llmMode === 'off');
   if (cfg.ssim_threshold) {
     chartThreshold = parseFloat(cfg.ssim_threshold);
   }
@@ -458,15 +489,13 @@ async function saveSettings(e) {
   e.preventDefault();
   const form = e.target;
   const result = document.getElementById('save-result');
+  // Send only what the form shows; the server merges it into the saved
+  // config, so fields edited elsewhere (e.g. the crop box) are kept.
   const cfg = {};
-  ['rtsp_url','mqtt_broker','mqtt_port','mqtt_user','mqtt_password',
-   'mqtt_topic','check_interval','ssim_threshold','score_history_size',
-   'crop_x','crop_y','crop_w','crop_h'].forEach(k => {
-    const el = form.elements[k];
-    if (el) {
-      const v = el.value;
-      cfg[k] = (el.type === 'number') ? parseFloat(v) : v;
-    }
+  Array.from(form.elements).forEach(el => {
+    if (!el.name) return;
+    if (el.name === 'mqtt_password' && !el.value) return;
+    cfg[el.name] = (el.type === 'number') ? parseFloat(el.value) : el.value;
   });
   const res = await fetch('/api/settings', {
     method: 'POST',
@@ -477,6 +506,8 @@ async function saveSettings(e) {
     result.textContent = '✓ Saved';
     result.className = 'test-result ok';
     toast('Settings saved', 'ok');
+    form.elements.mqtt_password.value = '';
+    loadSettings();
   } else {
     const d = await res.json().catch(() => ({}));
     result.textContent = d.detail || 'Save failed';
@@ -550,6 +581,130 @@ async function registerHomeAssistant() {
     el.textContent = '✓ Registered — find "Garage Monitor" under Settings ▸ Devices';
     el.className = 'test-result ok';
     toast('Added to Home Assistant', 'ok');
+  } else {
+    el.textContent = '✗ ' + (data.detail || 'Failed');
+    el.className = 'test-result fail';
+  }
+}
+
+// ── AI second opinion ─────────────────────────────────────────────────────────
+function renderAi(llm) {
+  const card = document.getElementById('ai-card');
+  if (llm) card.classList.remove('hidden');
+  else if (llmMode === 'off') card.classList.add('hidden');
+  if (!llm) return;
+  const body = document.getElementById('ai-body');
+  const when = llm.ts ? relativeTime(llm.ts) : '';
+  if (llm.error) {
+    body.innerHTML = `<p class="ai-error">${escapeHtml(llm.error)}</p>
+      <p class="ai-meta">${escapeHtml(llm.model || '')}${when ? ' · ' + when : ''}</p>`;
+    return;
+  }
+  const meta = [llm.model, `${llm.latency}s`, llm.load >= 1 ? `incl. ${llm.load}s model load` : '',
+                llm.manual ? 'manual check' : '', when].filter(Boolean).join(' · ');
+  body.innerHTML = `
+    <div class="ai-verdict">
+      <span class="ai-state is-${escapeHtml(llm.state)}">${escapeHtml(llm.state)}</span>
+      <span class="ai-conf">${Math.round(llm.confidence * 100)}% confident</span>
+    </div>
+    <p class="ai-reason">${escapeHtml(llm.reason)}</p>
+    <p class="ai-meta">${escapeHtml(meta)}</p>`;
+}
+
+function renderSuggestion(sug) {
+  const card = document.getElementById('suggestion-card');
+  if (!sug) { card.classList.add('hidden'); lastSuggestionTs = null; return; }
+  if (sug.ts === lastSuggestionTs) return;
+  lastSuggestionTs = sug.ts;
+  document.getElementById('suggestion-img').src = `/api/suggestion.jpg?t=${Date.now()}`;
+  document.getElementById('suggestion-text').textContent =
+    `The camera frame no longer matches either reference, but the AI has repeatedly seen the door ${sug.state}. ` +
+    `Use this frame as the new "${sug.state}" reference? Check the picture first.`;
+  card.classList.remove('hidden');
+}
+
+async function acceptSuggestion() {
+  const res = await fetch('/api/suggestion/accept', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { toast(data.detail || 'Failed', 'fail'); return; }
+  toast(`${data.state} reference updated`, 'ok');
+  renderSuggestion(null);
+  const img = new Image();
+  img.onload = () => setRefPreview(data.state, img.src);
+  img.src = `/api/ref/${data.state}.jpg?t=${Date.now()}`;
+}
+
+async function dismissSuggestion() {
+  await fetch('/api/suggestion/dismiss', { method: 'POST' });
+  renderSuggestion(null);
+}
+
+async function askAi() {
+  const btn = document.getElementById('ai-ask-btn');
+  btn.disabled = true; btn.textContent = 'Asking…';
+  try {
+    const res = await fetch('/api/llm/check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(data.detail || 'AI check failed', 'fail'); return; }
+    renderAi({ ...data, ts: new Date().toISOString() });
+  } finally {
+    btn.disabled = false; btn.textContent = 'Ask now';
+  }
+}
+
+function ensureModelOption(name) {
+  const sel = document.getElementById('llm_model');
+  if (![...sel.options].some(o => o.value === name)) {
+    sel.add(new Option(name, name));
+  }
+}
+
+async function loadLlmModels() {
+  const url = document.getElementById('llm_url').value.trim();
+  const sel = document.getElementById('llm_model');
+  const el  = document.getElementById('llm-test-result');
+  el.textContent = 'Loading models…'; el.className = 'test-result';
+  const res = await fetch('/api/llm/models?url=' + encodeURIComponent(url));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    el.textContent = '✗ ' + (data.detail || 'Failed'); el.className = 'test-result fail';
+    return;
+  }
+  const keep = sel.value;
+  sel.innerHTML = '';
+  data.models.forEach(m => {
+    const label = `${m.name}${m.size ? ' (' + m.size + ')' : ''}${m.vision ? '' : ' — no vision'}`;
+    const opt = new Option(label, m.name);
+    opt.disabled = !m.vision;
+    sel.add(opt);
+  });
+  const vision = data.models.filter(m => m.vision);
+  sel.value = vision.some(m => m.name === keep) ? keep : (vision[0]?.name || '');
+  el.textContent = vision.length
+    ? `✓ ${vision.length} vision model${vision.length > 1 ? 's' : ''} found`
+    : '✗ No vision-capable models installed';
+  el.className = 'test-result ' + (vision.length ? 'ok' : 'fail');
+}
+
+async function testLlm() {
+  const form = document.getElementById('settings-form');
+  const el   = document.getElementById('llm-test-result');
+  el.textContent = 'Asking the model… (first call may load it)'; el.className = 'test-result';
+  const payload = {};
+  ['llm_url', 'llm_model', 'llm_timeout', 'llm_keep_alive'].forEach(k => {
+    const f = form.elements[k];
+    payload[k] = f.type === 'number' ? parseFloat(f.value) : f.value;
+  });
+  const res = await fetch('/api/llm/check', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) {
+    el.textContent = `✓ ${data.state} (${Math.round(data.confidence * 100)}%) in ${data.latency}s — ${data.reason}`;
+    el.className = 'test-result ok';
   } else {
     el.textContent = '✗ ' + (data.detail || 'Failed');
     el.className = 'test-result fail';

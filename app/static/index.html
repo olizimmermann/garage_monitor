@@ -51,6 +51,18 @@
     <section id="tab-dashboard" class="tab-section active">
       <div class="dashboard-grid">
 
+        <div class="card suggestion-card hidden" id="suggestion-card">
+          <img id="suggestion-img" class="suggestion-img" alt="Suggested reference frame" />
+          <div class="suggestion-body">
+            <h3 class="card-title">Reference looks out of date</h3>
+            <p id="suggestion-text" class="suggestion-text"></p>
+            <div class="suggestion-actions">
+              <button class="btn btn-primary btn-sm" onclick="acceptSuggestion()">Use as new reference</button>
+              <button class="btn btn-ghost btn-sm" onclick="dismissSuggestion()">Dismiss</button>
+            </div>
+          </div>
+        </div>
+
         <div class="card status-card" id="status-card">
           <div class="status-icon-wrap" id="status-icon-wrap">
             <!-- door closed icon -->
@@ -76,6 +88,7 @@
           </div>
           <div class="status-label" id="status-label">Unknown</div>
           <div class="status-time" id="status-time">—</div>
+          <div class="status-source hidden" id="status-source"></div>
           <div id="error-banner" class="error-banner hidden"></div>
         </div>
 
@@ -119,6 +132,19 @@
           <h3 class="card-title">Event Log</h3>
           <div class="history-list" id="history-list">
             <p class="empty-state">No events yet.</p>
+          </div>
+        </div>
+
+        <div class="card ai-card hidden" id="ai-card">
+          <div class="card-header">
+            <h3 class="card-title">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 1a.75.75 0 0 1 .7.48l1.47 3.85 3.85 1.47a.75.75 0 0 1 0 1.4l-3.85 1.47-1.47 3.85a.75.75 0 0 1-1.4 0L7.83 9.67 3.98 8.2a.75.75 0 0 1 0-1.4l3.85-1.47L9.3 1.48A.75.75 0 0 1 10 1ZM15.5 12a.5.5 0 0 1 .47.33l.6 1.6 1.6.6a.5.5 0 0 1 0 .94l-1.6.6-.6 1.6a.5.5 0 0 1-.94 0l-.6-1.6-1.6-.6a.5.5 0 0 1 0-.94l1.6-.6.6-1.6a.5.5 0 0 1 .47-.33Z"/></svg>
+              AI Second Opinion
+            </h3>
+            <button class="btn btn-xs btn-ghost" id="ai-ask-btn" onclick="askAi()">Ask now</button>
+          </div>
+          <div id="ai-body" class="ai-body">
+            <p class="empty-state">Not consulted yet — the model is only asked when SSIM is unsure.</p>
           </div>
         </div>
 
@@ -292,7 +318,7 @@
             </div>
             <div class="field field-half">
               <label for="mqtt_password">Password</label>
-              <input type="password" id="mqtt_password" name="mqtt_password" autocomplete="new-password" />
+              <input type="password" id="mqtt_password" name="mqtt_password" autocomplete="new-password" placeholder="" />
             </div>
           </div>
           <div class="field">
@@ -339,6 +365,72 @@
               </label>
               <input type="number" id="score_history_size" name="score_history_size" value="60" min="1" max="1000" step="1" />
             </div>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <h3 class="card-title">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 1a.75.75 0 0 1 .7.48l1.47 3.85 3.85 1.47a.75.75 0 0 1 0 1.4l-3.85 1.47-1.47 3.85a.75.75 0 0 1-1.4 0L7.83 9.67 3.98 8.2a.75.75 0 0 1 0-1.4l3.85-1.47L9.3 1.48A.75.75 0 0 1 10 1Z"/></svg>
+            AI Second Opinion <span class="card-title-note">(optional, Ollama)</span>
+          </h3>
+          <p class="field-hint field-intro">A local vision model checks the camera frame when SSIM can't decide — e.g. after the scene changed or at night. It may always turn a reading into <em>open</em>, but only reports <em>closed</em> when SSIM itself was unsure.</p>
+          <div class="field">
+            <label for="llm_mode">Mode</label>
+            <select id="llm_mode" name="llm_mode">
+              <option value="off">Off</option>
+              <option value="uncertain">When uncertain — ask only if SSIM can't decide</option>
+              <option value="verify">Verify — also double-check every switch to closed</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="llm_url">Ollama URL</label>
+            <div class="input-group">
+              <input type="text" id="llm_url" name="llm_url" placeholder="http://192.168.1.x:11434" spellcheck="false" />
+              <button type="button" class="btn btn-outline" onclick="loadLlmModels()">Load models</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="llm_model">Model</label>
+            <select id="llm_model" name="llm_model">
+              <option value="">— load models first —</option>
+            </select>
+            <p class="field-hint">Only models with vision support can see the camera. Smaller is faster: a 2B model answers in ~2&nbsp;s on a Jetson Orin Nano.</p>
+          </div>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="llm_min_confidence">
+                Min. Confidence
+                <span class="tooltip" title="The model's answer is ignored below this self-reported confidence (0–1). Default: 0.7">?</span>
+              </label>
+              <input type="number" id="llm_min_confidence" name="llm_min_confidence" value="0.7" min="0" max="1" step="0.05" />
+            </div>
+            <div class="field field-half">
+              <label for="llm_margin">
+                Close-call Margin
+                <span class="tooltip" title="Also ask the model when the closed/open SSIM scores are closer together than this. Default: 0.05">?</span>
+              </label>
+              <input type="number" id="llm_margin" name="llm_margin" value="0.05" min="0" max="1" step="0.01" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="llm_timeout">
+                Timeout (s)
+                <span class="tooltip" title="Includes waiting in the server's queue and loading the model. Default: 60">?</span>
+              </label>
+              <input type="number" id="llm_timeout" name="llm_timeout" value="60" min="1" max="600" />
+            </div>
+            <div class="field field-half">
+              <label for="llm_keep_alive">
+                Keep Model Loaded
+                <span class="tooltip" title="Ollama keep_alive, e.g. 5m, 1h or 0. Keep it short if the server only holds one model and others use it too. Default: 5m">?</span>
+              </label>
+              <input type="text" id="llm_keep_alive" name="llm_keep_alive" value="5m" spellcheck="false" />
+            </div>
+          </div>
+          <div class="field-action">
+            <button type="button" class="btn btn-outline btn-sm" onclick="testLlm()">Test on current frame</button>
+            <span id="llm-test-result" class="test-result"></span>
           </div>
         </div>
 

@@ -240,6 +240,58 @@ input, button, select, label { font-family: inherit; font-size: inherit; }
   line-height: 1.4;
 }
 
+.status-source {
+  margin-top: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.status-source.src-llm      { border-color: var(--accent); color: #a5b8ff; }
+.status-source.src-fallback { border-color: rgba(239,68,68,.5); color: #fca5a5; }
+
+/* ── Suggestion banner ───────────────────────────────────────────────────── */
+.suggestion-card {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  border-color: var(--accent);
+  background: linear-gradient(0deg, rgba(79,124,255,.06), rgba(79,124,255,.06)), var(--bg-card);
+}
+.suggestion-card.hidden { display: none; }
+.suggestion-img { width: 180px; max-width: 40%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--radius-sm); flex-shrink: 0; }
+.suggestion-body { min-width: 0; }
+.suggestion-text { font-size: 13px; color: var(--text-2); margin: 4px 0 12px; }
+.suggestion-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── AI card ─────────────────────────────────────────────────────────────── */
+.ai-card { grid-column: 1 / -1; }
+.ai-card.hidden { display: none; }
+.ai-verdict { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.ai-state { font-size: 20px; font-weight: 700; text-transform: capitalize; }
+.ai-state.is-closed { color: var(--closed); }
+.ai-state.is-open   { color: var(--open); }
+.ai-conf  { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.ai-reason { font-size: 13px; color: var(--text-2); margin-top: 6px; overflow-wrap: anywhere; }
+.ai-meta { font-size: 12px; color: var(--text-3); margin-top: 8px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ai-error { font-size: 13px; color: #fca5a5; overflow-wrap: anywhere; }
+.field-intro { margin: -4px 0 14px; }
+.history-source { font-size: 11px; color: var(--text-3); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; flex-shrink: 0; }
+
+select {
+  padding: 0 12px;
+  height: var(--touch-target);
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  width: 100%;
+  min-width: 0;
+}
+select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,124,255,.15); }
+
 /* ── Scores card ─────────────────────────────────────────────────────────── */
 .scores-card { display: flex; flex-direction: column; gap: 14px; justify-content: center; }
 .score-row { display: flex; align-items: center; gap: 10px; }
@@ -623,4 +675,9 @@ input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px 
   /* field-action: always wrap result to next line */
   .field-action { flex-direction: column; align-items: flex-start; gap: 6px; }
   .field-action .btn { width: 100%; }
+}
+
+@media (max-width: 600px) {
+  .suggestion-card { flex-direction: column; align-items: stretch; }
+  .suggestion-img { width: 100%; max-width: none; }
 }

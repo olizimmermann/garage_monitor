@@ -16,13 +16,21 @@ coordinated disclosure.
 Garage Monitor is intended to run on a **trusted local network**. Keep this in
 mind when deploying:
 
-- The dashboard and API have **no authentication** — anyone who can reach the
-  port can view the feed and change settings. Do not expose it directly to the
-  internet; put it behind a reverse proxy with auth/TLS, or a VPN.
+- Authentication is **off by default**. Set `WEB_USERNAME` / `WEB_PASSWORD` to
+  enable HTTP Basic auth for the dashboard, API and WebSocket. Basic auth sends
+  credentials with every request, so use it over TLS (reverse proxy) or a trusted
+  LAN only. Never expose the port directly to the internet; use a VPN or a
+  reverse proxy with TLS.
+- The MQTT password is never returned by the API. The RTSP URL (which may embed
+  camera credentials) is visible to anyone who can log in.
+- If you enable the AI second opinion, camera frames are sent to the configured
+  Ollama server. Point it only at a server you control.
 - RTSP and MQTT **credentials** are stored in `data/config.json` and read from
   `.env`. Both are git-ignored — never commit them. Restrict file permissions on
   the `data/` directory.
-- The container does not need privileged access or host networking.
+- The container does not need privileged access or host networking. The server
+  process runs as an unprivileged user (uid 10001); the entrypoint only uses root
+  to fix ownership of the `data/` volume before dropping privileges.
 
 ## Supported versions
 

@@ -31,6 +31,10 @@ Example dashboard view:
 4. The state is published to MQTT (retained) and pushed live to the dashboard over a
    WebSocket.
 
+**Optional AI second opinion:** point the app at a local [Ollama](https://ollama.com)
+server with a vision model and it will ask the model — only when SSIM can't decide —
+whether the door is open. See [AI second opinion](#ai-second-opinion-ollama).
+
 **Safety-first low-confidence handling:** if neither reference matches above the
 configured threshold for two consecutive cycles, the door is reported as **open**.
 A garage you think is closed but isn't is the dangerous case, so ambiguity defaults
@@ -41,6 +45,8 @@ to open rather than to a false "closed".
 - 📷 RTSP camera input (TCP transport) — works with most IP cameras
 - 🎯 Crop-box targeting so only the door region is compared
 - 💡 CLAHE contrast normalization for robustness to lighting changes
+- 🤖 Optional local vision-LLM (Ollama) for uncertain readings, plus stale-reference detection
+- 🔒 Optional HTTP Basic auth for the dashboard and API
 - 🔀 MQTT publishing with retained state (Home Assistant ready)
 - 🏠 One-click Home Assistant registration via MQTT auto-discovery
 - 📊 Live dashboard: status badge, confidence bars, score chart, event history
@@ -103,7 +109,66 @@ environment variables.
 | `SSIM_THRESHOLD`   | `0.4`            | Minimum SSIM score to trust a match; below it → safety "open"      |
 | `SCORE_HISTORY_SIZE` | `60`           | Confidence readings kept & plotted on the dashboard chart          |
 | `CROP_X/Y/W/H`     | `0`              | Crop box; usually set by drawing it in the UI                      |
+| `LLM_MODE`         | `off`            | `off`, `uncertain` or `verify` — see below                         |
+| `LLM_URL`          | —                | Ollama base URL, e.g. `http://192.168.1.20:11434`                  |
+| `LLM_MODEL`        | —                | Vision model name, e.g. `qwen3.5:2b`                               |
+| `LLM_MIN_CONFIDENCE` | `0.7`          | Ignore model answers below this self-reported confidence           |
+| `LLM_MARGIN`       | `0.05`           | Also ask when the two SSIM scores are closer than this             |
+| `LLM_TIMEOUT`      | `60`             | Seconds per request, incl. queueing and cold model load            |
+| `LLM_KEEP_ALIVE`   | `5m`             | How long Ollama keeps the model loaded after a request             |
 | `DATA_DIR`         | `.`              | Where config and images are stored (set to `/app/data` in Docker)  |
+
+These are **environment-only** (not stored in `config.json`):
+
+| Variable           | Default | Description                                                  |
+| ------------------ | ------- | ------------------------------------------------------------ |
+| `WEB_USERNAME`     | —       | Username for HTTP Basic auth on the dashboard/API            |
+| `WEB_PASSWORD`     | —       | Enables Basic auth when set. Recommended on shared networks. |
+
+The MQTT password is never sent back to the browser; leave the field blank in
+Settings to keep the stored one.
+
+## AI second opinion (Ollama)
+
+SSIM only knows your two reference snapshots. When the scene drifts — new stuff in
+the garage, a different light, IR night mode — both scores sink and the monitor
+falls back to the safety default. A small local vision model can still answer the
+plain question *"is the door open?"*, so Garage Monitor can ask one.
+
+1. Run [Ollama](https://ollama.com) somewhere on your network with a
+   vision-capable model, e.g. `ollama pull qwen3.5:2b`.
+2. In **Settings ▸ AI Second Opinion**, enter the Ollama URL, click **Load models**
+   (only vision models are selectable), pick a mode, and **Test on current frame**.
+
+| Mode        | When the model is asked                                                              |
+| ----------- | ------------------------------------------------------------------------------------ |
+| `uncertain` | Only when SSIM is below the threshold or the two scores are within `LLM_MARGIN`.     |
+| `verify`    | As above, **plus** before every switch to *closed*, so a stale reference can't hide an open door. |
+
+**Safety rules.** The model may always turn a reading into *open*, but it only
+reports *closed* when SSIM itself was unsure. Answers below `LLM_MIN_CONFIDENCE`
+are ignored. If Ollama is unreachable or times out, the monitor carries on with
+SSIM and the usual safety fallback, and pauses AI requests for 60 s.
+
+**Stale-reference suggestions.** If neither reference matches but the model keeps
+seeing the same state (3 cycles in a row), the dashboard offers that frame as the new
+reference. Check the picture, then accept or dismiss — nothing is replaced
+automatically.
+
+**Shared / edge servers.** The app sends at most one request at a time, always uses
+a 4096-token context (a different `num_ctx` would force Ollama to reload the
+model), and downsizes frames to 768 px wide. On a Jetson Orin Nano Super running
+one model at a time, measured on real frames:
+
+| Model                  | Prompt tokens | Warm  | Cold (incl. load) |
+| ---------------------- | ------------- | ----- | ----------------- |
+| `qwen3.5:2b` (Q4_K_M)  | ~440          | ~2.2 s | 6–9 s            |
+| `qwen3-vl:2b-instruct` | ~1130         | ~4.5 s | 10–15 s          |
+
+Both classified all test frames correctly (day/night, open/closed, half-open);
+`qwen3.5:2b` is the recommended default. The published `…/state` MQTT payload
+includes a `source` field (`ssim`, `llm` or `fallback`) so automations can tell
+how a state was decided.
 
 ## MQTT topics
 
@@ -112,7 +177,7 @@ With the default `MQTT_TOPIC=garage/status`:
 | Topic                 | Payload                                          | Retained |
 | --------------------- | ------------------------------------------------ | -------- |
 | `garage/status`       | `open` or `closed`                               | yes      |
-| `garage/status/state` | `{"score_closed": 0.83, "score_open": 0.34}`     | yes      |
+| `garage/status/state` | `{"score_closed": 0.83, "score_open": 0.34, "source": "ssim"}` | yes |
 
 ### Home Assistant
 
@@ -145,7 +210,7 @@ The dashboard is a single-page app backed by a small FastAPI service:
 | POST   | `/api/monitor/start`       | Start the monitor loop               |
 | POST   | `/api/monitor/stop`        | Stop the monitor loop                |
 | GET    | `/api/settings`            | Read config                          |
-| POST   | `/api/settings`            | Save config (restarts monitor)       |
+| POST   | `/api/settings`            | Update config — partial, validated (restarts monitor) |
 | POST   | `/api/capture/{state}`     | Capture a reference from the camera  |
 | POST   | `/api/upload/{state}`      | Upload a reference image             |
 | POST   | `/api/crop`                | Save the crop box                    |
@@ -153,6 +218,12 @@ The dashboard is a single-page app backed by a small FastAPI service:
 | POST   | `/api/test/mqtt`           | Test MQTT broker credentials         |
 | POST   | `/api/homeassistant/discover` | Publish HA MQTT discovery config  |
 | GET    | `/api/current.jpg`         | Latest captured frame                |
+| GET    | `/api/llm/models`          | List Ollama models (vision flagged)  |
+| POST   | `/api/llm/check`           | Ask the vision model about the latest frame |
+| GET    | `/api/suggestion.jpg`      | Frame proposed as a new reference    |
+| POST   | `/api/suggestion/accept`   | Adopt it as the reference            |
+| POST   | `/api/suggestion/dismiss`  | Discard the suggestion               |
+| GET    | `/healthz`                 | Liveness probe (no auth)             |
 | WS     | `/ws`                      | Live status push (every 2 s)         |
 
 `{state}` is `closed` or `open`.
