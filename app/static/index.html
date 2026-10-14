@@ -94,20 +94,7 @@
 
         <div class="card scores-card">
           <h3 class="card-title">Confidence Scores</h3>
-          <div class="score-row">
-            <span class="score-name">Closed</span>
-            <div class="score-bar-wrap">
-              <div class="score-bar score-bar-closed" id="bar-closed" style="width:0%"></div>
-            </div>
-            <span class="score-val" id="val-closed">—</span>
-          </div>
-          <div class="score-row">
-            <span class="score-name">Open</span>
-            <div class="score-bar-wrap">
-              <div class="score-bar score-bar-open" id="bar-open" style="width:0%"></div>
-            </div>
-            <span class="score-val" id="val-open">—</span>
-          </div>
+          <div id="score-areas" class="score-areas"></div>
           <div class="threshold-line" id="threshold-note"></div>
         </div>
 
@@ -129,7 +116,10 @@
         </div>
 
         <div class="card history-card">
-          <h3 class="card-title">Event Log</h3>
+          <div class="card-header">
+            <h3 class="card-title">Event Log</h3>
+            <span class="card-subtitle">Click an entry to see its snapshot</span>
+          </div>
           <div class="history-list" id="history-list">
             <p class="empty-state">No events yet.</p>
           </div>
@@ -172,7 +162,7 @@
     <!-- ── SETUP ─────────────────────────────────────────────────────────── -->
     <section id="tab-setup" class="tab-section">
       <div class="setup-intro">
-        <p>Capture or upload a reference image for each door state, then define the crop region the monitor will analyse.</p>
+        <p>Capture or upload a reference image for each door state, then mark one or more areas the monitor will compare.</p>
       </div>
 
       <div class="ref-grid">
@@ -229,24 +219,30 @@
         </div>
       </div>
 
-      <!-- Crop tool -->
+      <!-- Comparison areas -->
       <div class="card crop-card" id="crop-card">
         <div class="card-header">
-          <h3 class="card-title">Crop Region</h3>
-          <span class="card-subtitle">Select the area the algorithm will compare — focus on the door panel itself.</span>
+          <h3 class="card-title">Comparison Areas</h3>
+          <span class="card-subtitle">Every area is compared on its own. If any area scores below its threshold, the AI second opinion is asked (when enabled).</span>
+        </div>
+
+        <div class="area-list" id="area-list"></div>
+        <div class="area-list-actions">
+          <button class="btn btn-outline btn-sm" id="add-area-btn" onclick="addArea()" disabled>+ Add area</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearAreas()">Compare whole frame</button>
         </div>
 
         <div class="crop-source-selector">
-          <span class="label-sm">Crop on:</span>
+          <span class="label-sm">Draw on:</span>
           <button class="btn btn-sm btn-outline active" id="crop-src-closed" onclick="loadCropImage('closed')">Closed ref</button>
           <button class="btn btn-sm btn-outline" id="crop-src-open" onclick="loadCropImage('open')">Open ref</button>
         </div>
 
         <div class="crop-container-wrap" id="crop-container-wrap">
           <div class="crop-placeholder" id="crop-placeholder">
-            <p>Capture or upload at least one reference image to enable the crop tool.</p>
+            <p>Capture or upload at least one reference image to enable the area tool.</p>
           </div>
-          <img id="crop-image" class="hidden" alt="Crop target" />
+          <img id="crop-image" class="hidden" alt="Area editor" />
         </div>
 
         <div class="crop-coords" id="crop-coords">
@@ -257,22 +253,13 @@
         </div>
 
         <div class="crop-actions-row">
-          <button class="btn btn-ghost btn-sm" onclick="resetCrop()">Reset to full frame</button>
-          <button class="btn btn-primary" id="apply-crop-btn" onclick="applyCrop()" disabled>Apply Crop</button>
+          <span id="areas-dirty" class="label-sm hidden">Unsaved changes</span>
+          <button class="btn btn-primary" id="save-areas-btn" onclick="saveAreas()" disabled>Save Areas</button>
         </div>
 
         <div id="crop-previews" class="crop-previews hidden">
           <h4>After crop &amp; processing:</h4>
-          <div class="crop-preview-pair">
-            <div class="crop-preview-item">
-              <span>Closed</span>
-              <img id="crop-preview-closed" alt="Closed processed" />
-            </div>
-            <div class="crop-preview-item">
-              <span>Open</span>
-              <img id="crop-preview-open" alt="Open processed" />
-            </div>
-          </div>
+          <div id="crop-preview-list" class="crop-preview-list"></div>
         </div>
       </div>
     </section>
@@ -363,7 +350,55 @@
                 Chart History Points
                 <span class="tooltip" title="How many of the most recent confidence readings to keep and plot on the dashboard chart. Persists across reloads. Default: 60">?</span>
               </label>
-              <input type="number" id="score_history_size" name="score_history_size" value="60" min="1" max="1000" step="1" />
+              <input type="number" id="score_history_size" name="score_history_size" value="60" min="1" max="10000" step="1" />
+            </div>
+            <div class="field field-half">
+              <label for="event_log_size">
+                Event Log Entries
+                <span class="tooltip" title="How many state changes the event log keeps. Default: 50">?</span>
+              </label>
+              <input type="number" id="event_log_size" name="event_log_size" value="50" min="1" max="1000" step="1" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="clahe_clip_limit">
+                Lighting Normalisation
+                <span class="tooltip" title="CLAHE clip limit applied before comparing. Higher evens out lighting more strongly but also amplifies noise. Default: 2.0">?</span>
+              </label>
+              <input type="number" id="clahe_clip_limit" name="clahe_clip_limit" value="2" min="0.5" max="20" step="0.1" />
+            </div>
+            <div class="field field-half">
+              <label for="fallback_after">
+                Unsure Cycles → Open
+                <span class="tooltip" title="Checks in a row without a confident answer (SSIM or AI) before the state defaults to open for safety. Default: 2">?</span>
+              </label>
+              <input type="number" id="fallback_after" name="fallback_after" value="2" min="1" max="100" step="1" />
+            </div>
+          </div>
+          <p class="field-hint">The SSIM threshold is the default for every area; an area can override it in Setup.</p>
+        </div>
+
+        <div class="card settings-card">
+          <h3 class="card-title">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M1 5.25A2.25 2.25 0 0 1 3.25 3h13.5A2.25 2.25 0 0 1 19 5.25v9.5A2.25 2.25 0 0 1 16.75 17H3.25A2.25 2.25 0 0 1 1 14.75v-9.5Zm1.5 5.81v3.69c0 .414.336.75.75.75h13.5a.75.75 0 0 0 .75-.75v-2.69l-2.22-2.219a.75.75 0 0 0-1.06 0l-1.91 1.909.47.47a.75.75 0 1 1-1.06 1.06L6.53 8.091a.75.75 0 0 0-1.06 0l-2.97 2.97ZM12 7a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z" clip-rule="evenodd"/></svg>
+            Snapshots
+          </h3>
+          <p class="field-hint field-intro">The camera frame behind every state change is saved as e.g. <code>2026-10-14_18-03-22_open_ai.jpg</code> (local time, new state, what decided it) and shown when you click the event.<span id="snapshot-dir-note"></span></p>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="snapshots_enabled">Save Snapshots</label>
+              <select id="snapshots_enabled" name="snapshots_enabled">
+                <option value="true">On</option>
+                <option value="false">Off</option>
+              </select>
+            </div>
+            <div class="field field-half">
+              <label for="snapshot_keep">
+                Keep Newest
+                <span class="tooltip" title="Older snapshots are deleted beyond this many files. 0 keeps everything. Default: 500">?</span>
+              </label>
+              <input type="number" id="snapshot_keep" name="snapshot_keep" value="500" min="0" max="100000" step="1" />
             </div>
           </div>
         </div>
@@ -428,6 +463,22 @@
               <input type="text" id="llm_keep_alive" name="llm_keep_alive" value="5m" spellcheck="false" />
             </div>
           </div>
+          <div class="field-row">
+            <div class="field field-half">
+              <label for="llm_backoff">
+                Retry Pause (s)
+                <span class="tooltip" title="After a failed request, wait this long before asking the server again. Default: 60">?</span>
+              </label>
+              <input type="number" id="llm_backoff" name="llm_backoff" value="60" min="0" max="3600" />
+            </div>
+            <div class="field field-half">
+              <label for="suggest_after">
+                Suggest New Reference After
+                <span class="tooltip" title="Checks in a row decided by the AI while some area matches neither reference, before offering that frame as a new reference. Default: 3">?</span>
+              </label>
+              <input type="number" id="suggest_after" name="suggest_after" value="3" min="1" max="100" />
+            </div>
+          </div>
           <div class="field-action">
             <button type="button" class="btn btn-outline btn-sm" onclick="testLlm()">Test on current frame</button>
             <span id="llm-test-result" class="test-result"></span>
@@ -443,6 +494,21 @@
     </section>
 
   </main>
+
+  <div id="event-modal" class="modal hidden" onclick="if (event.target === this) closeEvent()">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="event-title">
+      <div class="card-header">
+        <h3 class="card-title" id="event-title"></h3>
+        <button class="btn btn-xs btn-ghost" onclick="closeEvent()" aria-label="Close">✕</button>
+      </div>
+      <div class="snapshot-wrap" id="event-snapshot-wrap">
+        <img id="event-img" alt="Snapshot of the deciding frame" />
+        <div id="event-boxes"></div>
+      </div>
+      <p id="event-missing" class="empty-state hidden"></p>
+      <div id="event-details" class="event-details"></div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 

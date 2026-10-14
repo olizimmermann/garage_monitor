@@ -3,12 +3,26 @@ import json
 import os
 from pathlib import Path
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "."))
+# Snapshots of the frame behind every state change. Its own directory so it can
+# be mounted separately (e.g. onto a NAS) from the small data volume.
+SNAPSHOT_DIR = Path(os.getenv("SNAPSHOT_DIR") or DATA_DIR / "snapshots")
 _CONFIG_PATH = DATA_DIR / "config.json"
 
 LlmMode = Literal["off", "uncertain", "verify"]
+
+
+class Area(BaseModel):
+    """One region of the frame compared against both references."""
+    name: str = Field("Area", max_length=40)
+    x: int = Field(0, ge=0)
+    y: int = Field(0, ge=0)
+    w: int = Field(0, ge=0)
+    h: int = Field(0, ge=0)
+    # None = use the global ssim_threshold.
+    threshold: float | None = Field(None, ge=0.0, le=1.0)
 
 
 class Config(BaseModel):
@@ -19,12 +33,21 @@ class Config(BaseModel):
     mqtt_password: str = ""
     mqtt_topic: str = "garage/status"
     check_interval: int = Field(10, ge=1, le=3600)
-    crop_x: int = Field(0, ge=0)
-    crop_y: int = Field(0, ge=0)
-    crop_w: int = Field(0, ge=0)
-    crop_h: int = Field(0, ge=0)
+    # Regions compared against the references. Empty = the whole frame. If any
+    # area scores below its threshold, the reading counts as uncertain.
+    areas: list[Area] = Field(default_factory=list, max_length=16)
     ssim_threshold: float = Field(0.4, ge=0.0, le=1.0)
     score_history_size: int = Field(60, ge=1, le=10000)
+    # Lighting normalisation strength (CLAHE clip limit) applied before SSIM.
+    clahe_clip_limit: float = Field(2.0, ge=0.5, le=20.0)
+    # Unsure cycles in a row (no confident SSIM, no usable AI answer) before the
+    # state defaults to "open" for safety.
+    fallback_after: int = Field(2, ge=1, le=100)
+    event_log_size: int = Field(50, ge=1, le=1000)
+    # Save the frame behind each state change to SNAPSHOT_DIR.
+    snapshots_enabled: bool = True
+    # Oldest snapshots are deleted beyond this many (0 = keep all).
+    snapshot_keep: int = Field(500, ge=0, le=100000)
     # Optional vision-LLM second opinion (Ollama). "uncertain" asks only when
     # SSIM can't decide; "verify" additionally double-checks every switch to
     # "closed" so a stale reference can't hide an open door.
@@ -39,6 +62,23 @@ class Config(BaseModel):
     # How long Ollama keeps the model in memory after our request. Keep it short
     # on a box that holds only one model, so other users aren't held up.
     llm_keep_alive: str = "5m"
+    # Pause after a failed request before asking the server again.
+    llm_backoff: int = Field(60, ge=0, le=3600)
+    # Consecutive AI-decided cycles without any SSIM match before offering the
+    # frame as a new reference.
+    suggest_after: int = Field(3, ge=1, le=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_crop(cls, data):
+        """Older configs had a single crop box; turn it into the first area."""
+        if isinstance(data, dict) and "areas" not in data:
+            w, h = int(data.get("crop_w") or 0), int(data.get("crop_h") or 0)
+            if w and h:
+                data = {**data, "areas": [{
+                    "name": "Area 1", "x": int(data.get("crop_x") or 0),
+                    "y": int(data.get("crop_y") or 0), "w": w, "h": h}]}
+        return data
 
 
 def _env_defaults() -> dict:
@@ -46,11 +86,16 @@ def _env_defaults() -> dict:
         "rtsp_url": "RTSP_URL", "mqtt_broker": "MQTT_BROKER", "mqtt_port": "MQTT_PORT",
         "mqtt_user": "MQTT_USER", "mqtt_password": "MQTT_PASSWORD",
         "mqtt_topic": "MQTT_TOPIC", "check_interval": "CHECK_INTERVAL",
+        # Legacy single crop box; migrated into `areas` by the Config validator.
         "crop_x": "CROP_X", "crop_y": "CROP_Y", "crop_w": "CROP_W", "crop_h": "CROP_H",
         "ssim_threshold": "SSIM_THRESHOLD", "score_history_size": "SCORE_HISTORY_SIZE",
         "llm_mode": "LLM_MODE", "llm_url": "LLM_URL", "llm_model": "LLM_MODEL",
         "llm_min_confidence": "LLM_MIN_CONFIDENCE", "llm_margin": "LLM_MARGIN",
         "llm_timeout": "LLM_TIMEOUT", "llm_keep_alive": "LLM_KEEP_ALIVE",
+        "llm_backoff": "LLM_BACKOFF", "suggest_after": "SUGGEST_AFTER",
+        "clahe_clip_limit": "CLAHE_CLIP_LIMIT", "fallback_after": "FALLBACK_AFTER",
+        "event_log_size": "EVENT_LOG_SIZE", "snapshots_enabled": "SNAPSHOTS_ENABLED",
+        "snapshot_keep": "SNAPSHOT_KEEP",
     }
     return {field: os.environ[var] for field, var in env.items() if os.getenv(var)}
 

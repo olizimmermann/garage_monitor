@@ -5,10 +5,11 @@
 set -e
 
 DATA_DIR="${DATA_DIR:-/app/data}"
-mkdir -p "$DATA_DIR"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$DATA_DIR/snapshots}"
+mkdir -p "$DATA_DIR" "$SNAPSHOT_DIR"
 
 if [ "$(id -u)" = "0" ]; then
-    chown -R app:app "$DATA_DIR"
+    chown -R app:app "$DATA_DIR" "$SNAPSHOT_DIR"
     exec setpriv --reuid=app --regid=app --init-groups "$@"
 fi
 

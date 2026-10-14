@@ -2,6 +2,7 @@ from __future__ import annotations
 import cv2
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -12,7 +13,7 @@ from skimage.metrics import structural_similarity as ssim
 
 import paho.mqtt.client as mqtt
 
-from config import Config, DATA_DIR, load_config
+from config import Area, Config, DATA_DIR, SNAPSHOT_DIR, load_config
 from llm import LlmError, classify
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -22,17 +23,21 @@ REF_OPEN   = str(DATA_DIR / "ref_open.jpg")
 CURRENT    = str(DATA_DIR / "current.jpg")
 SUGGESTION = str(DATA_DIR / "suggestion.jpg")
 SCORE_HISTORY = str(DATA_DIR / "score_history.json")
+EVENTS = str(DATA_DIR / "events.json")
+
+# Snapshot files we create (and are therefore allowed to serve and prune), e.g.
+# 2026-10-14_18-03-22_open_ai.jpg — local time, new state, what decided it.
+SNAPSHOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?_(open|closed)_(ssim|ai|fallback)\.jpg$")
+_SNAPSHOT_SOURCE = {"ssim": "ssim", "llm": "ai", "fallback": "fallback"}
 
 # Smallest crop side we accept; SSIM's default 7×7 window needs headroom.
 MIN_CROP = 16
 # Seconds between score-history flushes (avoids an SD-card write every cycle).
 SCORE_FLUSH_INTERVAL = 60
-# Consecutive LLM-decided cycles before suggesting a reference refresh.
-SUGGEST_AFTER = 3
 # Bound how long a dead camera can stall a cycle (and therefore a stop/restart).
 _CAPTURE_TIMEOUT_MS = 10000
 
-_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+_clahe_cache: dict[float, cv2.CLAHE] = {}
 
 
 # ── image helpers ──────────────────────────────────────────────────────────────
@@ -48,29 +53,31 @@ def grab_frame(rtsp_url: str):
     return frame if ret else None
 
 
-def crop(frame, cfg: Config):
-    """Apply the configured crop, clamped to the frame. Falls back to the full
-    frame when no crop is set or the box doesn't overlap the image enough."""
-    if cfg.crop_w == 0 or cfg.crop_h == 0:
+def crop(frame, area: Area | None):
+    """Cut out one area, clamped to the frame. Falls back to the full frame
+    when there is no area or the box doesn't overlap the image enough."""
+    if area is None or area.w == 0 or area.h == 0:
         return frame
     fh, fw = frame.shape[:2]
-    x0, y0 = min(cfg.crop_x, fw), min(cfg.crop_y, fh)
-    x1, y1 = min(cfg.crop_x + cfg.crop_w, fw), min(cfg.crop_y + cfg.crop_h, fh)
+    x0, y0 = min(area.x, fw), min(area.y, fh)
+    x1, y1 = min(area.x + area.w, fw), min(area.y + area.h, fh)
     if x1 - x0 < MIN_CROP or y1 - y0 < MIN_CROP:
         return frame
     return frame[y0:y1, x0:x1]
 
 
-def preprocess(img):
+def preprocess(img, clip_limit: float):
+    clahe = _clahe_cache.get(clip_limit)
+    if clahe is None:
+        clahe = _clahe_cache[clip_limit] = cv2.createCLAHE(clipLimit=clip_limit,
+                                                           tileGridSize=(8, 8))
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return _clahe.apply(gray)
+    return clahe.apply(gray)
 
 
-def load_ref(path: str, cfg: Config):
-    img = cv2.imread(path)
-    if img is None:
-        return None
-    return preprocess(crop(img, cfg))
+def compare_areas(cfg: Config) -> list[Area | None]:
+    """The regions to compare; None stands for the whole frame."""
+    return list(cfg.areas) or [None]
 
 
 def _mtime(path: str) -> float:
@@ -81,39 +88,102 @@ def _mtime(path: str) -> float:
 
 
 def _ref_key(cfg: Config) -> tuple:
-    """Changes whenever the crop box or either reference file changes, so the
-    loop picks up new references without a restart."""
-    return (cfg.crop_x, cfg.crop_y, cfg.crop_w, cfg.crop_h,
+    """Changes whenever an area, the preprocessing or either reference file
+    changes, so the loop picks up new references without a restart."""
+    return (tuple(a.model_dump_json() for a in cfg.areas), cfg.clahe_clip_limit,
             _mtime(REF_CLOSED), _mtime(REF_OPEN))
 
 
-def _load_refs(cfg: Config):
-    rc = load_ref(REF_CLOSED, cfg)
-    ro = load_ref(REF_OPEN, cfg)
-    if rc is None or ro is None:
+def _load_refs(cfg: Config) -> list[tuple] | None:
+    """(area, closed_ref, open_ref) per area, preprocessed and size-matched."""
+    img_closed, img_open = cv2.imread(REF_CLOSED), cv2.imread(REF_OPEN)
+    if img_closed is None or img_open is None:
         return None
-    h, w = rc.shape
-    return rc, cv2.resize(ro, (w, h))
+    refs = []
+    for area in compare_areas(cfg):
+        rc = preprocess(crop(img_closed, area), cfg.clahe_clip_limit)
+        ro = preprocess(crop(img_open, area), cfg.clahe_clip_limit)
+        h, w = rc.shape
+        refs.append((area, rc, cv2.resize(ro, (w, h))))
+    return refs
 
 
-# ── score history persistence ───────────────────────────────────────────────────
+def measure(frame, refs: list[tuple], cfg: Config) -> list[dict]:
+    """SSIM of every area against both references."""
+    readings = []
+    for area, ref_closed, ref_open in refs:
+        h, w = ref_closed.shape
+        current = cv2.resize(preprocess(crop(frame, area), cfg.clahe_clip_limit), (w, h))
+        sc = float(ssim(current, ref_closed))
+        so = float(ssim(current, ref_open))
+        threshold = area.threshold if area and area.threshold is not None else cfg.ssim_threshold
+        readings.append({
+            "name": area.name if area else "Full frame",
+            "box": [area.x, area.y, area.w, area.h] if area and area.w and area.h else None,
+            "score_closed": round(sc, 4),
+            "score_open": round(so, 4),
+            "threshold": threshold,
+            "state": "open" if so > sc else "closed",
+            "confident": max(sc, so) >= threshold,
+        })
+    return readings
 
-def _load_score_history() -> list[dict]:
+
+def weakest(readings: list[dict]) -> dict:
+    """The area closest to (or furthest below) its threshold — the one that
+    decides whether SSIM alone can be trusted."""
+    return min(readings, key=lambda r: max(r["score_closed"], r["score_open"]) - r["threshold"])
+
+
+# ── persistence ────────────────────────────────────────────────────────────────
+
+def _read_list(path: str) -> list[dict]:
     try:
-        data = json.loads(Path(SCORE_HISTORY).read_text())
+        data = json.loads(Path(path).read_text())
         return data if isinstance(data, list) else []
     except Exception:
         return []
 
 
-def _save_score_history(history: list[dict]) -> None:
+def _write_list(path: str, items: list[dict]) -> None:
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = Path(SCORE_HISTORY + ".tmp")
-        tmp.write_text(json.dumps(history))
-        tmp.replace(SCORE_HISTORY)
+        tmp = Path(path + ".tmp")
+        tmp.write_text(json.dumps(items))
+        tmp.replace(path)
     except Exception as e:
-        print(f"Score history save error: {e}")
+        print(f"Could not save {path}: {e}")
+
+
+def _save_snapshot(frame, state: str, source: str, cfg: Config) -> str | None:
+    """Store the frame that caused a state change; returns the file name."""
+    if not cfg.snapshots_enabled:
+        return None
+    try:
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+        suffix = f"_{state}_{_SNAPSHOT_SOURCE.get(source, 'ssim')}.jpg"
+        name, n = stamp + suffix, 1
+        while (SNAPSHOT_DIR / name).exists():
+            n += 1
+            name = f"{stamp}-{n}{suffix}"
+        if not cv2.imwrite(str(SNAPSHOT_DIR / name), frame, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+            raise OSError("could not write image")
+        _prune_snapshots(cfg.snapshot_keep)
+        return name
+    except Exception as e:
+        print(f"Snapshot save error: {e}")
+        return None
+
+
+def _prune_snapshots(keep: int) -> None:
+    """Delete our oldest snapshots beyond `keep`; other files are left alone."""
+    if keep <= 0:
+        return
+    files = sorted((p for p in SNAPSHOT_DIR.iterdir() if SNAPSHOT_RE.match(p.name)),
+                   key=lambda p: p.stat().st_mtime)
+    for p in files[:-keep]:
+        p.unlink(missing_ok=True)
 
 
 # ── MQTT ───────────────────────────────────────────────────────────────────────
@@ -162,23 +232,24 @@ def _publish(client, topic: str, payload: str, retain: bool = False) -> None:
 # ── shared state ───────────────────────────────────────────────────────────────
 
 class MonitorState:
-    MAX_HISTORY = 50
-
     def __init__(self):
         self._lock = threading.Lock()
         self.state: str = "unknown"
         self.source: str | None = None
         self.score_closed: float = 0.0
         self.score_open: float = 0.0
+        self.areas: list[dict] = []
         self.last_update: str | None = None
         self.error: str | None = None
         self.running: bool = False
-        self.history: list[dict] = []
+        # State-change events, persisted so the log and its snapshots survive
+        # restarts.
+        self.history: list[dict] = _read_list(EVENTS)
         self.llm: dict | None = None
         self.suggestion: dict | None = None
         # Rolling history of every confidence reading (not just state changes),
         # persisted to disk so the dashboard chart survives reloads/restarts.
-        self.score_history: list[dict] = _load_score_history()
+        self.score_history: list[dict] = _read_list(SCORE_HISTORY)
         self._last_flush = time.monotonic()
         self._dirty = False
 
@@ -187,27 +258,57 @@ class MonitorState:
             for k, v in fields.items():
                 setattr(self, k, v)
 
-    def update(self, state: str, sc: float, so: float, error: str | None = None,
-               source: str = "ssim") -> bool:
-        """Returns True if state changed."""
+    def is_new_event(self, state: str) -> bool:
+        """A real change compared to the last logged event. Restarts reset the
+        live state to "unknown", but must not log (and snapshot) the same state
+        again."""
+        with self._lock:
+            return (state in ("open", "closed")
+                    and (not self.history or self.history[-1]["state"] != state))
+
+    def update(self, state: str, readings: list[dict], error: str | None = None,
+               source: str = "ssim", *, frame_size: tuple[int, int] | None = None,
+               snapshot: str | None = None, llm: dict | None = None,
+               history_limit: int = 50) -> bool:
+        """Record one reading; on a new state also log an event (with the
+        deciding snapshot). Returns True if the live state changed."""
+        top = weakest(readings)
+        log_event = self.is_new_event(state)
         with self._lock:
             changed = state != self.state
             self.state = state
             self.source = source
-            self.score_closed = sc
-            self.score_open = so
+            self.score_closed = top["score_closed"]
+            self.score_open = top["score_open"]
+            self.areas = readings
             self.last_update = datetime.now(timezone.utc).isoformat()
             self.error = error
-            if changed:
+            if log_event:
                 self.history.append({
                     "ts": self.last_update,
                     "state": state,
                     "source": source,
-                    "score_closed": round(sc, 4),
-                    "score_open": round(so, 4),
+                    "score_closed": top["score_closed"],
+                    "score_open": top["score_open"],
+                    "areas": readings,
+                    "frame": list(frame_size) if frame_size else None,
+                    "snapshot": snapshot,
+                    "llm": ({k: llm.get(k) for k in ("state", "confidence", "reason", "model")}
+                            if llm else None),
+                    "note": error,
                 })
-                self.history = self.history[-self.MAX_HISTORY:]
+                self.history = self.history[-history_limit:]
+                events = list(self.history)
+        if log_event:
+            _write_list(EVENTS, events)
         return changed
+
+    def mark_failure(self, error: str) -> None:
+        with self._lock:
+            self.score_closed = self.score_open = 0.0
+            self.areas = []
+            self.last_update = datetime.now(timezone.utc).isoformat()
+            self.error = error
 
     def record_score(self, ts: str, sc: float, so: float, limit: int) -> None:
         """Append one confidence reading; flush to disk at most once a minute."""
@@ -230,7 +331,7 @@ class MonitorState:
             snapshot = list(self.score_history)
             self._dirty = False
             self._last_flush = time.monotonic()
-        _save_score_history(snapshot)
+        _write_list(SCORE_HISTORY, snapshot)
 
     def get_score_history(self, limit: int) -> list[dict]:
         with self._lock:
@@ -245,6 +346,7 @@ class MonitorState:
                 "source": self.source,
                 "score_closed": round(self.score_closed, 4),
                 "score_open": round(self.score_open, 4),
+                "areas": list(self.areas),
                 "last_update": self.last_update,
                 "error": self.error,
                 "running": self.running,
@@ -278,47 +380,60 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def decide(frame, sc: float, so: float, cfg: Config, current_state: str,
-           consecutive_unsure: int) -> tuple[str, str, str | None, int]:
-    """Pick the reported state from SSIM scores, optionally consulting the LLM.
+def decide(frame, readings: list[dict], cfg: Config, current_state: str,
+           consecutive_unsure: int) -> tuple[str, str, str | None, int, dict | None]:
+    """Pick the reported state from the per-area SSIM readings, optionally
+    consulting the LLM.
 
-    Returns (state, source, error_note, consecutive_unsure). `source` is
-    "ssim", "llm" or "fallback" (the safety default when nothing is sure).
-    Safety bias: the LLM may always turn a reading into "open", but it can
-    only report "closed" when SSIM itself was unsure.
+    SSIM alone decides only when every area clears its threshold and all areas
+    agree. Otherwise — at least one area below its threshold, areas
+    disagreeing, or a close call — the reading is uncertain and the LLM is asked.
+
+    Returns (state, source, error_note, consecutive_unsure, llm_result).
+    `source` is "ssim", "llm" or "fallback" (the safety default when nothing is
+    sure). Safety bias: the LLM may always turn a reading into "open", but it
+    can only report "closed" when SSIM itself was unsure.
     """
-    confident = max(sc, so) >= cfg.ssim_threshold
-    ssim_state = "open" if so > sc else "closed"
-    close_call = abs(sc - so) < cfg.llm_margin
+    states = {r["state"] for r in readings}
+    all_confident = all(r["confident"] for r in readings)
+    agree = len(states) == 1
+    close_call = any(abs(r["score_closed"] - r["score_open"]) < cfg.llm_margin
+                     for r in readings)
+    ssim_state = next(iter(states)) if agree else "open"
+    res = None
 
     if cfg.llm_mode != "off":
-        uncertain = not confident or close_call
+        uncertain = not all_confident or not agree or close_call
         verify = (cfg.llm_mode == "verify" and ssim_state == "closed"
                   and current_state != "closed")
         if uncertain or verify:
             res = _ask_llm(frame, cfg)
             if res and res["confidence"] >= cfg.llm_min_confidence:
                 if uncertain or res["state"] == "open":
-                    return res["state"], "llm", None, 0
+                    return res["state"], "llm", None, 0, res
 
-    if confident:
-        return ssim_state, "ssim", None, 0
+    if all_confident and agree:
+        return ssim_state, "ssim", None, 0, res
+    if any(r["confident"] and r["state"] == "open" for r in readings):
+        return "open", "ssim", "Areas disagree — reporting open (safety)", 0, res
 
     consecutive_unsure += 1
-    if consecutive_unsure >= 2:
-        return "open", "fallback", "Low confidence — defaulting to open (safety)", consecutive_unsure
+    if consecutive_unsure >= cfg.fallback_after:
+        return ("open", "fallback", "Low confidence — defaulting to open (safety)",
+                consecutive_unsure, res)
     prev = current_state if current_state in ("open", "closed") else "unknown"
-    return prev, "fallback", "Low confidence — keeping previous state", consecutive_unsure
+    return prev, "fallback", "Low confidence — keeping previous state", consecutive_unsure, res
 
 
-def _track_suggestion(frame, state: str, source: str, sc: float, so: float,
+def _track_suggestion(frame, state: str, source: str, readings: list[dict],
                       cfg: Config, streak: dict) -> None:
-    """If the LLM keeps deciding because SSIM can't match *either* reference,
-    the reference for that state is probably stale — offer to replace it."""
-    if source == "llm" and max(sc, so) < cfg.ssim_threshold:
+    """If the LLM keeps deciding because SSIM can't match *either* reference in
+    some area, the reference for that state is probably stale — offer to
+    replace it."""
+    if source == "llm" and not all(r["confident"] for r in readings):
         streak["n"] = streak["n"] + 1 if streak.get("state") == state else 1
         streak["state"] = state
-        if streak["n"] >= SUGGEST_AFTER and not monitor_state.suggestion:
+        if streak["n"] >= cfg.suggest_after and not monitor_state.suggestion:
             cv2.imwrite(SUGGESTION, frame)
             monitor_state.set(suggestion={"state": state, "ts": _now()})
     else:
@@ -351,7 +466,6 @@ def _run(stop: threading.Event) -> None:
     if refs is None:
         monitor_state.set(error="Reference images not found — complete Setup first.")
         return
-    ref_closed, ref_open = refs
 
     mqtt_client = None
     if cfg.mqtt_broker:
@@ -374,9 +488,9 @@ def _run(stop: threading.Event) -> None:
                 # Reload references if the crop box or a reference image changed
                 new_key = _ref_key(cfg)
                 if new_key != ref_key:
-                    refs = _load_refs(cfg)
-                    if refs is not None:
-                        ref_closed, ref_open = refs
+                    new_refs = _load_refs(cfg)
+                    if new_refs is not None:
+                        refs = new_refs
                         ref_key = new_key
                         streak.clear()
                         monitor_state.set(suggestion=None)
@@ -389,35 +503,41 @@ def _run(stop: threading.Event) -> None:
 
                 frame = grab_frame(cfg.rtsp_url)
                 if frame is None:
-                    monitor_state.update(monitor_state.state, 0, 0,
-                                         "Failed to grab frame from RTSP stream",
-                                         source=monitor_state.source or "ssim")
+                    monitor_state.mark_failure("Failed to grab frame from RTSP stream")
                     stop.wait(cfg.check_interval)
                     continue
 
                 cv2.imwrite(CURRENT, frame)
 
-                h, w = ref_closed.shape
-                current = cv2.resize(preprocess(crop(frame, cfg)), (w, h))
-                sc = float(ssim(current, ref_closed))
-                so = float(ssim(current, ref_open))
+                readings = measure(frame, refs, cfg)
+                new_state, source, note, consecutive_unsure, llm_res = decide(
+                    frame, readings, cfg, monitor_state.state, consecutive_unsure)
+                # Only this thread logs events, so checking before update() is
+                # safe; the snapshot name is then stored with the event.
+                snapshot = None
+                if monitor_state.is_new_event(new_state):
+                    snapshot = _save_snapshot(frame, new_state, source, cfg)
+                monitor_state.update(new_state, readings, note, source=source,
+                                     frame_size=(frame.shape[1], frame.shape[0]),
+                                     snapshot=snapshot, llm=llm_res,
+                                     history_limit=cfg.event_log_size)
+                _track_suggestion(frame, new_state, source, readings, cfg, streak)
 
-                new_state, source, note, consecutive_unsure = decide(
-                    frame, sc, so, cfg, monitor_state.state, consecutive_unsure)
-                monitor_state.update(new_state, sc, so, note, source=source)
-                _track_suggestion(frame, new_state, source, sc, so, cfg, streak)
-
+                top = weakest(readings)
                 if mqtt_client and new_state in ("open", "closed") and new_state != published:
                     _publish(mqtt_client, cfg.mqtt_topic, new_state, retain=True)
                     _publish(mqtt_client, cfg.mqtt_topic + "/state",
-                             json.dumps({"score_closed": round(sc, 4),
-                                         "score_open": round(so, 4),
-                                         "source": source}),
+                             json.dumps({"score_closed": top["score_closed"],
+                                         "score_open": top["score_open"],
+                                         "source": source,
+                                         "snapshot": snapshot,
+                                         "areas": [{k: r[k] for k in ("name", "score_closed", "score_open")}
+                                                   for r in readings]}),
                              retain=True)
                     published = new_state
 
-                monitor_state.record_score(monitor_state.last_update, sc, so,
-                                           cfg.score_history_size)
+                monitor_state.record_score(monitor_state.last_update, top["score_closed"],
+                                           top["score_open"], cfg.score_history_size)
             except Exception as e:
                 # One bad cycle (odd frame, bad crop, disk full…) must not kill
                 # monitoring; report it and try again next interval.

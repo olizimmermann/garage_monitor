@@ -8,8 +8,12 @@ services:
       - "8088:8080"
     volumes:
       - ./data:/app/data
+      # Frames behind every state change (shown when you click an Event Log
+      # entry). Point this anywhere, e.g. a NAS share.
+      - ./snapshots:/app/snapshots
     environment:
       - DATA_DIR=/app/data
+      - SNAPSHOT_DIR=/app/snapshots
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=false"

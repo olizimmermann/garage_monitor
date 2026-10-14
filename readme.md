@@ -11,8 +11,9 @@ It compares the live camera frame against two reference snapshots (one of the do
 closed, one open) and publishes the result to MQTT for Home Assistant or any other
 home-automation platform.
 
-A built-in web dashboard handles the whole setup: capture reference images, draw a
-crop box over the door, tune the match threshold, and watch live confidence scores.
+A built-in web dashboard handles the whole setup: capture reference images, mark one
+or more areas to compare, tune the thresholds, and watch live confidence scores.
+Every state change is logged with a snapshot of the frame that caused it.
 Optionally, a local vision model (via [Ollama](https://ollama.com)) gives a second
 opinion when the image match is unsure.
 
@@ -23,27 +24,34 @@ Example dashboard view:
 ## How it works
 
 1. You capture two reference images — the door **closed** and **open**.
-2. You draw a **crop box** around the part of the frame that changes (just the door),
-   so the rest of the scene doesn't affect the match.
-3. On each cycle the monitor grabs a frame, crops it, applies
+2. You mark one or more **areas** of the frame that change with the door (e.g. the
+   door panel and the gap at the floor), so the rest of the scene doesn't affect the
+   match. Without areas the whole frame is compared.
+3. On each cycle the monitor grabs a frame, cuts out every area, applies
    [CLAHE](https://en.wikipedia.org/wiki/Adaptive_histogram_equalization#Contrast_Limited_AHE)
    contrast normalization (so lighting changes don't fool it), and computes the
    [SSIM](https://en.wikipedia.org/wiki/Structural_similarity) structural similarity
-   against each reference. The higher score wins.
-4. If the match is unsure, the optional [AI second opinion](#ai-second-opinion-ollama)
-   is consulted; otherwise the safety rule below applies.
+   of each area against both references.
+4. If every area clears its threshold and all areas agree, that's the state. If **at
+   least one area is below its threshold** (or the areas disagree, or it's a close
+   call), the reading is uncertain and the optional
+   [AI second opinion](#ai-second-opinion-ollama) is consulted; otherwise the safety
+   rules below apply.
 5. The state is published to MQTT (retained) and pushed live to the dashboard over a
-   WebSocket.
+   WebSocket. On every change the deciding frame is saved as a
+   [snapshot](#snapshots).
 
-**Safety-first low-confidence handling:** if neither reference matches above the
-configured threshold for two consecutive cycles, the door is reported as **open**.
+**Safety-first low-confidence handling:** if an area confidently sees the door open,
+the door is reported **open** even when other areas disagree. If the areas can't
+decide for two consecutive cycles (configurable), the door is reported as **open**.
 A garage you think is closed but isn't is the dangerous case, so ambiguity defaults
 to open rather than to a false "closed".
 
 ## Features
 
 - 📷 RTSP camera input (TCP transport) — works with most IP cameras
-- 🎯 Crop-box targeting so only the door region is compared
+- 🎯 Multiple comparison areas, each with an optional own threshold
+- 📸 Snapshot of the deciding frame for every state change, viewable from the event log
 - 💡 CLAHE contrast normalization for robustness to lighting changes
 - 🤖 Optional local vision-LLM (Ollama) for uncertain readings, plus stale-reference detection
 - 🔒 Optional HTTP Basic auth for the dashboard and API
@@ -94,15 +102,15 @@ to open rather than to a false "closed".
    ```
 
 4. Open the dashboard at **http://localhost:8088** and complete the **Setup** tab:
-   capture/upload the closed and open reference images, draw the crop box, then
+   capture/upload the closed and open reference images, mark the comparison areas, then
    press **Start**. From then on monitoring starts automatically with the container.
 
-Settings and reference images persist in the `./data` volume, so they survive
-restarts and image rebuilds.
+Settings and reference images persist in the `./data` volume, snapshots in the
+`./snapshots` volume, so they survive restarts and image rebuilds.
 
 **Tip:** take the reference images in typical conditions, and retake them when the
-garage changes noticeably (new objects, moved camera). A tight crop around the door
-itself makes the match far more robust to everything else in the scene.
+garage changes noticeably (new objects, moved camera). Tight areas around the door
+itself make the match far more robust to everything else in the scene.
 
 ## Configuration
 
@@ -124,9 +132,14 @@ environment variables.
 | `MQTT_PASSWORD`    | —                | MQTT password                                                      |
 | `MQTT_TOPIC`       | `garage/status`  | Base topic for published state                                     |
 | `CHECK_INTERVAL`   | `10`             | Seconds between frame checks                                       |
-| `SSIM_THRESHOLD`   | `0.4`            | Minimum SSIM score to trust a match; below it → safety "open"      |
+| `SSIM_THRESHOLD`   | `0.4`            | Minimum SSIM score to trust an area; areas can override it in Setup |
 | `SCORE_HISTORY_SIZE` | `60`           | Confidence readings kept & plotted on the dashboard chart          |
-| `CROP_X/Y/W/H`     | `0`              | Crop box; usually set by drawing it in the UI                      |
+| `EVENT_LOG_SIZE`   | `50`             | State changes kept in the event log                                |
+| `CLAHE_CLIP_LIMIT` | `2.0`            | Strength of the lighting normalization                             |
+| `FALLBACK_AFTER`   | `2`              | Unsure cycles in a row before defaulting to "open"                 |
+| `SNAPSHOTS_ENABLED`| `true`           | Save the frame behind each state change                            |
+| `SNAPSHOT_KEEP`    | `500`            | Newest snapshots to keep (`0` = all)                               |
+| `CROP_X/Y/W/H`     | `0`              | Legacy single crop box — migrated to the first area automatically  |
 | `LLM_MODE`         | `off`            | `off`, `uncertain` or `verify` — see below                         |
 | `LLM_URL`          | —                | Ollama base URL, e.g. `http://192.168.1.20:11434`                  |
 | `LLM_MODEL`        | —                | Vision model name, e.g. `qwen3.5:2b`                               |
@@ -134,14 +147,18 @@ environment variables.
 | `LLM_MARGIN`       | `0.05`           | Also ask when the two SSIM scores are closer than this             |
 | `LLM_TIMEOUT`      | `60`             | Seconds per request, incl. queueing and cold model load            |
 | `LLM_KEEP_ALIVE`   | `5m`             | How long Ollama keeps the model loaded after a request             |
-| `DATA_DIR`         | `.`              | Where config and images are stored (set to `/app/data` in Docker)  |
+| `LLM_BACKOFF`      | `60`             | Seconds to pause AI requests after a failure                       |
+| `SUGGEST_AFTER`    | `3`              | AI-decided cycles before offering a new reference                  |
 
 These are **environment-only** (not stored in `config.json`):
 
-| Variable           | Default | Description                                                  |
-| ------------------ | ------- | ------------------------------------------------------------ |
-| `WEB_USERNAME`     | —       | Username for HTTP Basic auth on the dashboard/API            |
-| `WEB_PASSWORD`     | —       | Enables Basic auth when set. Recommended on shared networks. |
+| Variable           | Default               | Description                                                  |
+| ------------------ | --------------------- | ------------------------------------------------------------ |
+| `WEB_USERNAME`     | —                     | Username for HTTP Basic auth on the dashboard/API            |
+| `WEB_PASSWORD`     | —                     | Enables Basic auth when set. Recommended on shared networks. |
+| `DATA_DIR`         | `.`                   | Where config and references are stored (`/app/data` in Docker) |
+| `SNAPSHOT_DIR`     | `$DATA_DIR/snapshots` | Where snapshots are stored (`/app/snapshots` in Docker)      |
+| `TZ`               | `UTC`                 | Time zone used in snapshot file names                        |
 
 The MQTT password is never sent back to the browser; leave the field blank in
 Settings to keep the stored one.
@@ -160,16 +177,16 @@ plain question *"is the door open?"*, so Garage Monitor can ask one.
 
 | Mode        | When the model is asked                                                              |
 | ----------- | ------------------------------------------------------------------------------------ |
-| `uncertain` | Only when SSIM is below the threshold or the two scores are within `LLM_MARGIN`.     |
+| `uncertain` | Only when at least one area is below its threshold, the areas disagree, or an area's two scores are within `LLM_MARGIN`. |
 | `verify`    | As above, **plus** before every switch to *closed*, so a stale reference can't hide an open door. |
 
 **Safety rules.** The model may always turn a reading into *open*, but it only
 reports *closed* when SSIM itself was unsure. Answers below `LLM_MIN_CONFIDENCE`
 are ignored. If Ollama is unreachable or times out, the monitor carries on with
-SSIM and the usual safety fallback, and pauses AI requests for 60 s.
+SSIM and the usual safety fallback, and pauses AI requests for `LLM_BACKOFF` seconds.
 
-**Stale-reference suggestions.** If neither reference matches but the model keeps
-seeing the same state (3 cycles in a row), the dashboard offers that frame as the new
+**Stale-reference suggestions.** If an area matches neither reference but the model
+keeps seeing the same state (3 cycles in a row by default), the dashboard offers that frame as the new
 reference. Check the picture, then accept or dismiss — nothing is replaced
 automatically.
 
@@ -195,7 +212,9 @@ With the default `MQTT_TOPIC=garage/status`:
 | Topic                 | Payload                                          | Retained |
 | --------------------- | ------------------------------------------------ | -------- |
 | `garage/status`       | `open` or `closed`                               | yes      |
-| `garage/status/state` | `{"score_closed": 0.83, "score_open": 0.34, "source": "ssim"}` | yes |
+| `garage/status/state` | `{"score_closed": 0.83, "score_open": 0.34, "source": "ssim", "snapshot": "2026-10-14_18-41-07_closed_ssim.jpg", "areas": [{"name": "Door", "score_closed": 0.83, "score_open": 0.34}]}` | yes |
+
+The top-level scores are those of the least confident area.
 
 ### Home Assistant
 
@@ -217,6 +236,23 @@ mqtt:
       device_class: garage_door
 ```
 
+## Snapshots
+
+Whenever the reported state changes, the camera frame that caused it is saved to
+`SNAPSHOT_DIR` (`./snapshots` with the compose template — mount it wherever you
+like, e.g. a NAS share). Names sort chronologically and say what happened:
+
+```
+2026-10-14_18-03-22_open_ai.jpg        # local time (TZ), new state, decided by the AI
+2026-10-14_18-41-07_closed_ssim.jpg    # decided by the image match
+2026-10-14_19-02-55_open_fallback.jpg  # safety fallback
+```
+
+Click an entry in the dashboard's **Event Log** to see its snapshot with the compared
+areas outlined, each area's scores and threshold, and the AI's reasoning if it was
+consulted. Only the newest `SNAPSHOT_KEEP` files are kept; other files in the folder
+are never touched.
+
 ## API
 
 The dashboard is a single-page app backed by a small FastAPI service. When login is
@@ -233,7 +269,8 @@ send it with `curl -u user:pass …`):
 | POST   | `/api/settings`            | Update config — partial, validated (restarts monitor) |
 | POST   | `/api/capture/{state}`     | Capture a reference from the camera  |
 | POST   | `/api/upload/{state}`      | Upload a reference image             |
-| POST   | `/api/crop`                | Save the crop box                    |
+| POST   | `/api/areas`               | Save the comparison areas            |
+| GET    | `/api/snapshots/{name}`    | Snapshot saved with an event         |
 | POST   | `/api/test/rtsp`           | Test an RTSP URL                     |
 | POST   | `/api/test/mqtt`           | Test MQTT broker credentials         |
 | POST   | `/api/homeassistant/discover` | Publish HA MQTT discovery config  |
@@ -270,6 +307,11 @@ docker compose up -d --build
 
 Your settings and reference images in `./data` are kept. Since the new AI settings
 default to *off*, existing installs behave exactly as before until you enable them.
+A crop box from an older version becomes the first comparison area automatically.
+
+To keep snapshots outside `./data`, add the `./snapshots` volume and `SNAPSHOT_DIR`
+from [`docker-compose_template.yml`](docker-compose_template.yml) to your
+`docker-compose.yml`; without them snapshots go to `./data/snapshots`.
 
 Older versions ran the container as root. The container now runs as an unprivileged
 user and fixes the ownership of `./data` automatically on start, so files there will
@@ -283,6 +325,7 @@ show up as owned by uid `10001` on the host.
 | "Failed to grab frame from RTSP stream" | Check the URL with **Settings ▸ Test**. The app uses RTSP over TCP; some cameras need a sub-stream path. |
 | Door often reported *open* via "safety fallback" | Neither reference matches well. Retake references, tighten the crop, or enable the AI second opinion. |
 | Score history or settings not saved | `./data` isn't writable — check the volume mount. |
+| Event log says "Snapshot … is no longer available" | It was pruned (`SNAPSHOT_KEEP`) or deleted, or `./snapshots` isn't mounted and the container was recreated. |
 | AI card shows "Ollama unreachable" | Check the URL from the container's point of view (not `localhost`), and that Ollama listens on the network (`OLLAMA_HOST=0.0.0.0`). |
 
 ## Local development

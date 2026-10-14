@@ -19,12 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from config import Config, DATA_DIR, load_config, save_config
+from config import Area, Config, DATA_DIR, SNAPSHOT_DIR, load_config, save_config
 from llm import LlmError, classify, list_vision_models, reset_backoff
 from monitor import (
-    MIN_CROP, REF_CLOSED, REF_OPEN, CURRENT, SUGGESTION,
-    _make_client, _publish, adopt_suggestion, crop, grab_frame, monitor_state,
-    preprocess, start_monitor, stop_monitor,
+    MIN_CROP, REF_CLOSED, REF_OPEN, CURRENT, SUGGESTION, SNAPSHOT_RE,
+    _make_client, _publish, adopt_suggestion, compare_areas, crop, grab_frame,
+    monitor_state, preprocess, start_monitor, stop_monitor,
 )
 
 # Optional HTTP Basic auth for the whole UI/API. Strongly recommended whenever
@@ -150,6 +150,7 @@ async def get_settings():
     for k in _SECRET_FIELDS:
         data[k + "_set"] = bool(data[k])
         data[k] = ""
+    data["snapshot_dir"] = str(SNAPSHOT_DIR.resolve())  # informational, read-only
     return data
 
 
@@ -227,51 +228,65 @@ async def get_ref(state: str):
 
 
 @app.get("/api/ref/{state}/preview")
-def get_ref_preview(state: str):
-    """Cropped + CLAHE processed preview of a reference image."""
+def get_ref_preview(state: str, area: int = 0):
+    """Cropped + CLAHE processed preview of a reference image for one area."""
     path = _ref_path(state)
     img = cv2.imread(path)
     if img is None:
         raise HTTPException(404, "Reference image not set yet.")
     cfg = load_config()
-    processed = preprocess(crop(img, cfg))
+    areas = compare_areas(cfg)
+    if not 0 <= area < len(areas):
+        raise HTTPException(404, "No such area.")
+    processed = preprocess(crop(img, areas[area]), cfg.clahe_clip_limit)
     bgr = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
     _, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return StreamingResponse(io.BytesIO(buf.tobytes()), media_type="image/jpeg")
 
 
-# ── crop ───────────────────────────────────────────────────────────────────────
+# ── comparison areas ───────────────────────────────────────────────────────────
 
-class CropPayload(BaseModel):
-    x: int = Field(0, ge=0)
-    y: int = Field(0, ge=0)
-    w: int = Field(0, ge=0)
-    h: int = Field(0, ge=0)
+class AreasPayload(BaseModel):
+    areas: list[Area] = Field(default_factory=list, max_length=16)
 
 
-@app.post("/api/crop")
-def apply_crop(payload: CropPayload):
-    if payload.w or payload.h:
-        if payload.w < MIN_CROP or payload.h < MIN_CROP:
-            raise HTTPException(422, f"Crop must be at least {MIN_CROP}×{MIN_CROP} px.")
-        ref = cv2.imread(REF_CLOSED)
+@app.post("/api/areas")
+def save_areas(payload: AreasPayload):
+    """Replace the list of compared areas. An empty list compares the full frame."""
+    ref = cv2.imread(REF_CLOSED)
+    for i, a in enumerate(payload.areas, 1):
+        label = a.name.strip() or f"Area {i}"
+        if a.w < MIN_CROP or a.h < MIN_CROP:
+            raise HTTPException(422, f"{label}: must be at least {MIN_CROP}×{MIN_CROP} px.")
         if ref is not None:
             rh, rw = ref.shape[:2]
-            if payload.x + payload.w > rw or payload.y + payload.h > rh:
-                raise HTTPException(422, f"Crop exceeds the reference image ({rw}×{rh}).")
+            if a.x + a.w > rw or a.y + a.h > rh:
+                raise HTTPException(422, f"{label}: exceeds the reference image ({rw}×{rh}).")
+        a.name = label
     cfg = load_config()
-    cfg.crop_x, cfg.crop_y, cfg.crop_w, cfg.crop_h = payload.x, payload.y, payload.w, payload.h
+    cfg.areas = payload.areas
     save_config(cfg)
     return {"ok": True}
 
 
-# ── live frame ─────────────────────────────────────────────────────────────────
+# ── live frame & snapshots ─────────────────────────────────────────────────────
 
 @app.get("/api/current.jpg")
 async def get_current():
     if not Path(CURRENT).exists():
         raise HTTPException(404, "No frame captured yet.")
     return FileResponse(CURRENT, media_type="image/jpeg")
+
+
+@app.get("/api/snapshots/{name}")
+async def get_snapshot(name: str):
+    """The frame behind a logged state change. Only names the monitor itself
+    generates are served, so this can't be used to read other files."""
+    path = SNAPSHOT_DIR / name
+    if not SNAPSHOT_RE.match(name) or not path.is_file():
+        raise HTTPException(404, "Snapshot not found (it may have been pruned).")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
 
 
 # ── test connections ───────────────────────────────────────────────────────────

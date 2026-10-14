@@ -27,7 +27,6 @@ NUM_CTX = 4096
 # from this app (monitor loop + manual "Ask AI" button), and back off after a
 # failure instead of piling onto a busy or offline server.
 _inflight = threading.Lock()
-_BACKOFF_S = 60
 _backoff_until = 0.0
 
 # Downscale before sending: 2B vision models don't benefit from 1080p and the
@@ -135,7 +134,7 @@ def classify(frame, cfg: Config, *, force: bool = False) -> dict:
         resp = _request(cfg.llm_url, "/api/chat", body, cfg.llm_timeout)
         latency = time.monotonic() - t0
     except LlmError:
-        _backoff_until = time.monotonic() + _BACKOFF_S
+        _backoff_until = time.monotonic() + cfg.llm_backoff
         raise
     finally:
         _inflight.release()

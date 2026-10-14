@@ -2,8 +2,14 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let cropper = null;
-let cropImageLoaded = false;
 let currentCropSource = 'closed';
+let areas = [];            // comparison areas being edited in Setup
+let selectedArea = -1;
+let areasLoaded = false;
+let areasDirty = false;
+let cropperReady = false;
+let cropperGen = 0;         // bumps on every rebuild so stale callbacks bail out
+let historyCache = [];
 let ws = null;
 let feedInterval = null;
 let lastHistoryKey = '';
@@ -154,6 +160,7 @@ function switchTab(tab) {
 
   if (tab === 'settings') loadSettings();
   if (tab === 'setup')    refreshCropTool();
+  if (tab !== 'setup' && areasDirty) toast('Area changes are not saved yet', 'fail');
 }
 
 // Cropper.js sizes itself from its container, which is 0×0 while the Setup tab
@@ -173,6 +180,8 @@ function escapeHtml(str) {
 }
 
 const SOURCE_LABELS = { ssim: 'via image match', llm: 'via AI', fallback: 'safety fallback' };
+const AREA_COLORS = ['#4f7cff', '#c084fc', '#22d3ee', '#f472b6', '#facc15', '#34d399', '#fb923c', '#a3e635'];
+const areaColor = i => AREA_COLORS[i % AREA_COLORS.length];
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg, type = '') {
@@ -220,12 +229,7 @@ function applyStatus(s) {
   document.getElementById('icon-open').classList.toggle('hidden',    s.state !== 'open');
   document.getElementById('icon-unknown').classList.toggle('hidden', s.state !== 'unknown');
 
-  // Scores
-  const sc = s.score_closed, so = s.score_open;
-  document.getElementById('bar-closed').style.width = Math.round(sc * 100) + '%';
-  document.getElementById('bar-open').style.width   = Math.round(so * 100) + '%';
-  document.getElementById('val-closed').textContent = sc ? sc.toFixed(3) : '—';
-  document.getElementById('val-open').textContent   = so ? so.toFixed(3) : '—';
+  renderScores(s);
 
   // Error
   const err = document.getElementById('error-banner');
@@ -267,26 +271,137 @@ function relativeTime(isoStr) {
   return Math.round(diff / 3600) + 'h ago';
 }
 
+// One closed/open bar pair per area. Rebuilt only when the set of areas
+// changes so the bar widths can animate between readings.
+function renderScores(s) {
+  const el = document.getElementById('score-areas');
+  const list = (s.areas && s.areas.length) ? s.areas
+    : [{ name: '', score_closed: s.score_closed, score_open: s.score_open }];
+  const multi = list.length > 1;
+  const key = list.map(a => a.name).join('\u0000');
+  if (el.dataset.key !== key) {
+    el.dataset.key = key;
+    el.innerHTML = list.map((a, i) => `
+      <div class="score-area">
+        ${multi ? `<div class="score-area-head">
+          <span class="area-swatch" style="background:${areaColor(i)}"></span>
+          <span class="score-area-name">${escapeHtml(a.name)}</span>
+          <span class="score-flag hidden">below threshold</span>
+        </div>` : ''}
+        ${['closed', 'open'].map(st => `
+        <div class="score-row">
+          <span class="score-name">${st === 'closed' ? 'Closed' : 'Open'}</span>
+          <div class="score-bar-wrap"><div class="score-bar score-bar-${st}" style="width:0%"></div></div>
+          <span class="score-val">—</span>
+        </div>`).join('')}
+      </div>`).join('');
+  }
+  el.querySelectorAll('.score-area').forEach((block, i) => {
+    const a = list[i];
+    block.querySelectorAll('.score-row').forEach((row, j) => {
+      const v = j === 0 ? a.score_closed : a.score_open;
+      row.querySelector('.score-bar').style.width = Math.round(Math.max(0, v || 0) * 100) + '%';
+      row.querySelector('.score-val').textContent = v ? v.toFixed(3) : '—';
+    });
+    const flag = block.querySelector('.score-flag');
+    if (flag) flag.classList.toggle('hidden', a.confident !== false);
+  });
+  const thresholds = [...new Set(list.map(a => a.threshold).filter(t => t != null))];
+  document.getElementById('threshold-note').textContent = thresholds.length
+    ? `Threshold ${thresholds.map(t => t.toFixed(2)).join(' / ')}` +
+      (multi ? ' · any area below it counts as uncertain' : '')
+    : '';
+}
+
 function renderHistory(history) {
   const el = document.getElementById('history-list');
+  historyCache = history;
   if (!history.length) {
     el.innerHTML = '<p class="empty-state">No events yet.</p>';
     return;
   }
-  el.innerHTML = [...history].reverse().map(h => `
-    <div class="history-item">
-      <span class="history-dot dot-${h.state}"></span>
-      <span class="history-state" style="color:var(--${h.state === 'closed' ? 'closed' : h.state === 'open' ? 'open' : 'unknown'})">${h.state}</span>
+  el.innerHTML = history.map((h, i) => ({ h, i })).reverse().map(({ h, i }) => `
+    <button type="button" class="history-item" onclick="openEvent(${i})">
+      <span class="history-dot dot-${escapeHtml(h.state)}"></span>
+      <span class="history-state" style="color:var(--${h.state === 'closed' ? 'closed' : h.state === 'open' ? 'open' : 'unknown'})">${escapeHtml(h.state)}</span>
       ${h.source && h.source !== 'ssim' ? `<span class="history-source">${escapeHtml(SOURCE_LABELS[h.source] || h.source)}</span>` : ''}
-      <span class="history-scores">c=${h.score_closed.toFixed(3)} o=${h.score_open.toFixed(3)}</span>
+      <span class="history-scores">c=${h.score_closed.toFixed(3)} o=${h.score_open.toFixed(3)}${h.areas && h.areas.length > 1 ? ` · ${h.areas.length} areas` : ''}</span>
+      ${h.snapshot ? '<svg class="history-snap" viewBox="0 0 20 20" fill="currentColor" aria-label="Snapshot available"><path fill-rule="evenodd" d="M1 8a2 2 0 0 1 2-2h.93a2 2 0 0 0 1.664-.89l.812-1.22A2 2 0 0 1 8.07 3h3.86a2 2 0 0 1 1.664.89l.812 1.22A2 2 0 0 0 16.07 6H17a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8Zm13.5 3a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM10 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/></svg>' : ''}
       <span class="history-time">${formatTs(h.ts)}</span>
-    </div>
+    </button>
   `).join('');
 }
 
 function formatTs(isoStr) {
   const d = new Date(isoStr);
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ── Event detail (snapshot preview) ───────────────────────────────────────────
+function openEvent(i) {
+  const h = historyCache[i];
+  if (!h) return;
+  const stateLabel = h.state.charAt(0).toUpperCase() + h.state.slice(1);
+  document.getElementById('event-title').textContent =
+    `${stateLabel} · ${new Date(h.ts).toLocaleString()}`;
+
+  const wrap = document.getElementById('event-snapshot-wrap');
+  const img = document.getElementById('event-img');
+  const missing = document.getElementById('event-missing');
+  const boxes = document.getElementById('event-boxes');
+  boxes.innerHTML = '';
+  if (h.snapshot) {
+    const url = `/api/snapshots/${encodeURIComponent(h.snapshot)}`;
+    wrap.classList.remove('hidden');
+    missing.classList.add('hidden');
+    img.onerror = () => {
+      wrap.classList.add('hidden');
+      missing.textContent = `Snapshot ${h.snapshot} is no longer available (deleted or pruned).`;
+      missing.classList.remove('hidden');
+    };
+    img.src = url;
+    // Outline the compared areas on top of the frame.
+    const [fw, fh] = h.frame || [];
+    if (fw && fh) {
+      boxes.innerHTML = (h.areas || []).map((a, j) => {
+        if (!a.box) return '';
+        const [x, y, w, bh] = a.box;
+        const c = areaColor(j);
+        return `<div class="snap-box" style="left:${x / fw * 100}%;top:${y / fh * 100}%;width:${w / fw * 100}%;height:${bh / fh * 100}%;border-color:${c}">
+          <span style="background:${c}">${escapeHtml(a.name)}</span></div>`;
+      }).join('');
+    }
+  } else {
+    wrap.classList.add('hidden');
+    img.removeAttribute('src');
+    missing.textContent = 'No snapshot was saved for this event (snapshots off, or logged by an older version).';
+    missing.classList.remove('hidden');
+  }
+
+  const rows = (h.areas || []).map((a, j) => `
+    <tr class="${a.confident === false ? 'is-low' : ''}">
+      <td><span class="area-swatch" style="background:${areaColor(j)}"></span>${escapeHtml(a.name)}</td>
+      <td>${a.score_closed.toFixed(3)}</td>
+      <td>${a.score_open.toFixed(3)}</td>
+      <td>${a.threshold != null ? a.threshold.toFixed(2) : '—'}</td>
+      <td>${a.confident === false ? 'below' : escapeHtml(a.state)}</td>
+    </tr>`).join('');
+  const ai = h.llm ? `<p class="event-ai"><strong>AI${h.source === 'llm' ? ' (decided)' : ' (consulted)'}:</strong>
+      ${escapeHtml(h.llm.state)}, ${Math.round(h.llm.confidence * 100)}% — ${escapeHtml(h.llm.reason)}
+      <span class="ai-meta">${escapeHtml(h.llm.model || '')}</span></p>` : '';
+  document.getElementById('event-details').innerHTML = `
+    <p class="event-meta">Decided ${escapeHtml(SOURCE_LABELS[h.source] || h.source || '')}
+      ${h.note ? ` · ${escapeHtml(h.note)}` : ''}
+      ${h.snapshot ? ` · <a href="/api/snapshots/${encodeURIComponent(h.snapshot)}" download="${escapeHtml(h.snapshot)}">${escapeHtml(h.snapshot)}</a>` : ''}</p>
+    ${ai}
+    ${rows ? `<table class="event-table">
+      <thead><tr><th>Area</th><th>Closed</th><th>Open</th><th>Threshold</th><th>Says</th></tr></thead>
+      <tbody>${rows}</tbody></table>` : ''}`;
+  document.getElementById('event-modal').classList.remove('hidden');
+}
+
+function closeEvent() {
+  document.getElementById('event-modal').classList.add('hidden');
 }
 
 // ── Live feed ─────────────────────────────────────────────────────────────────
@@ -370,7 +485,7 @@ function setRefPreview(state, src) {
   ph.classList.add('hidden');
 }
 
-// ── Crop tool ─────────────────────────────────────────────────────────────────
+// ── Comparison areas ──────────────────────────────────────────────────────────
 function enableCropTool(preferState) {
   document.getElementById('crop-placeholder').classList.add('hidden');
   currentCropSource = preferState || currentCropSource;
@@ -396,16 +511,21 @@ function loadCropImage(state) {
 }
 
 function initCropper(img) {
+  const gen = ++cropperGen;
+  cropperReady = false;
   cropper = new Cropper(img, {
     viewMode: 1,
-    autoCropArea: 0.6,
+    autoCrop: false,
     movable: false,
     rotatable: false,
     scalable: false,
     zoomable: false,
-    ready() {
-      loadCropFromSettings();
-      document.getElementById('apply-crop-btn').disabled = false;
+    async ready() {
+      if (!areasLoaded) await loadAreas();
+      if (gen !== cropperGen) return; // replaced while the areas were loading
+      cropperReady = true;
+      document.getElementById('add-area-btn').disabled = false;
+      showSelectedArea();
     },
     crop(event) {
       const d = event.detail;
@@ -413,50 +533,188 @@ function initCropper(img) {
       document.getElementById('coord-y').textContent = Math.round(d.y);
       document.getElementById('coord-w').textContent = Math.round(d.width);
       document.getElementById('coord-h').textContent = Math.round(d.height);
-    }
+    },
+    // Commit only when the user finished dragging: Cropper also emits `crop`
+    // while it is rebuilt or re-laid out (e.g. a window resize with the Setup
+    // tab hidden), and those boxes must never overwrite an area.
+    cropend() {
+      if (gen !== cropperGen || !cropperReady || !cropper?.cropped) return;
+      const a = areas[selectedArea];
+      const d = cropper.getData(true);
+      if (!a || d.width < 1 || d.height < 1) return;
+      const box = { x: d.x, y: d.y, w: d.width, h: d.height };
+      if (box.x === a.x && box.y === a.y && box.w === a.w && box.h === a.h) return;
+      Object.assign(a, box);
+      const dims = document.querySelector(`#area-list .area-row[data-i="${selectedArea}"] .area-dims`);
+      if (dims) dims.textContent = `${a.w}×${a.h}`;
+      markAreasDirty();
+    },
   });
 }
 
-async function loadCropFromSettings() {
+async function loadAreas() {
   try {
     const res = await fetch('/api/settings');
     const cfg = await res.json();
-    if (cfg.crop_w && cfg.crop_h && cropper) {
-      cropper.setData({
-        x: cfg.crop_x, y: cfg.crop_y,
-        width: cfg.crop_w, height: cfg.crop_h,
-      });
-    }
+    areas = (cfg.areas || []).map(a => ({ ...a }));
+    chartThreshold = parseFloat(cfg.ssim_threshold) || chartThreshold;
+    selectedArea = areas.length ? 0 : -1;
+    areasLoaded = true;
+    setAreasDirty(false);
+    renderAreaList();
+    if (areas.length) refreshCropPreviews();
   } catch (_) {}
 }
 
-function resetCrop() {
-  if (cropper) cropper.reset();
+function renderAreaList() {
+  const el = document.getElementById('area-list');
+  if (!areas.length) {
+    el.innerHTML = '<p class="empty-state">No areas — the whole frame is compared. Add an area to focus on the door.</p>';
+    return;
+  }
+  el.innerHTML = areas.map((a, i) => `
+    <div class="area-row ${i === selectedArea ? 'selected' : ''}" data-i="${i}" onclick="selectArea(${i})">
+      <span class="area-swatch" style="background:${areaColor(i)}"></span>
+      <input type="text" class="area-name" value="${escapeHtml(a.name)}" maxlength="40"
+             aria-label="Area name" oninput="areas[${i}].name = this.value; markAreasDirty()" />
+      <label class="area-thr" title="Threshold for this area. Leave blank to use the global SSIM threshold from Settings.">
+        <span>Threshold</span>
+        <input type="number" min="0" max="1" step="0.01" placeholder="${chartThreshold.toFixed(2)}"
+               value="${a.threshold ?? ''}" aria-label="Area threshold"
+               oninput="areas[${i}].threshold = this.value === '' ? null : parseFloat(this.value); markAreasDirty()" />
+      </label>
+      <span class="area-dims">${a.w}×${a.h}</span>
+      <button type="button" class="btn btn-xs btn-ghost" title="Remove area"
+              onclick="event.stopPropagation(); removeArea(${i})">✕</button>
+    </div>`).join('');
 }
 
-async function applyCrop() {
+function selectArea(i) {
+  if (i === selectedArea) return;
+  selectedArea = i;
+  document.querySelectorAll('#area-list .area-row').forEach(r =>
+    r.classList.toggle('selected', +r.dataset.i === i));
+  showSelectedArea();
+}
+
+// Put the crop box on the selected area and outline all the others.
+function showSelectedArea() {
   if (!cropper) return;
-  const d = cropper.getData(true);
-  const payload = { x: d.x, y: d.y, w: d.width, h: d.height };
-  const res = await fetch('/api/crop', {
+  const a = areas[selectedArea];
+  if (a) {
+    cropper.crop();
+    cropper.setData({ x: a.x, y: a.y, width: a.w, height: a.h });
+    document.querySelector('.cropper-crop-box')?.style.setProperty('--area-color', areaColor(selectedArea));
+  } else {
+    cropper.clear();
+    ['x', 'y', 'w', 'h'].forEach(k => document.getElementById('coord-' + k).textContent = '—');
+  }
+  drawAreaOverlays();
+}
+
+function drawAreaOverlays() {
+  if (!cropper || !cropper.cropper) return;
+  const host = cropper.cropper;
+  host.querySelectorAll('.area-overlay').forEach(n => n.remove());
+  const c = cropper.getCanvasData();
+  if (!c.naturalWidth) return;
+  const k = c.width / c.naturalWidth;
+  areas.forEach((a, i) => {
+    if (i === selectedArea) return;
+    const div = document.createElement('div');
+    div.className = 'area-overlay';
+    div.style.cssText = `left:${c.left + a.x * k}px;top:${c.top + a.y * k}px;` +
+      `width:${a.w * k}px;height:${a.h * k}px;border-color:${areaColor(i)}`;
+    const tag = document.createElement('button');
+    tag.type = 'button';
+    tag.textContent = a.name || `Area ${i + 1}`;
+    tag.style.background = areaColor(i);
+    tag.onclick = () => selectArea(i);
+    div.appendChild(tag);
+    host.appendChild(div);
+  });
+}
+
+function addArea() {
+  if (!cropper) return;
+  const img = cropper.getImageData();
+  const w = Math.round(img.naturalWidth * 0.25), h = Math.round(img.naturalHeight * 0.25);
+  // Offset each new box a little so it doesn't hide exactly behind the last one.
+  const off = Math.round(Math.min(img.naturalWidth, img.naturalHeight) * 0.05) * (areas.length % 4);
+  areas.push({
+    name: `Area ${areas.length + 1}`,
+    x: Math.round((img.naturalWidth - w) / 2) + off,
+    y: Math.round((img.naturalHeight - h) / 2) + off,
+    w, h, threshold: null,
+  });
+  selectedArea = areas.length - 1;
+  renderAreaList();
+  showSelectedArea();
+  markAreasDirty();
+}
+
+function removeArea(i) {
+  areas.splice(i, 1);
+  if (selectedArea >= areas.length) selectedArea = areas.length - 1;
+  renderAreaList();
+  showSelectedArea();
+  markAreasDirty();
+}
+
+function clearAreas() {
+  if (!areas.length) return;
+  areas = [];
+  selectedArea = -1;
+  renderAreaList();
+  showSelectedArea();
+  markAreasDirty();
+}
+
+function markAreasDirty() { setAreasDirty(true); }
+
+function setAreasDirty(dirty) {
+  areasDirty = dirty;
+  document.getElementById('areas-dirty').classList.toggle('hidden', !dirty);
+  document.getElementById('save-areas-btn').disabled = !dirty;
+}
+
+async function saveAreas() {
+  const payload = { areas: areas.map((a, i) => ({ ...a, name: (a.name || '').trim() || `Area ${i + 1}` })) };
+  const res = await fetch('/api/areas', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) { toast('Failed to save crop', 'fail'); return; }
-  toast('Crop applied', 'ok');
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    toast(typeof d.detail === 'string' ? d.detail : 'Failed to save areas', 'fail');
+    return;
+  }
+  areas = payload.areas;
+  setAreasDirty(false);
+  renderAreaList();
+  drawAreaOverlays();
+  toast(areas.length ? `${areas.length} area${areas.length > 1 ? 's' : ''} saved` : 'Comparing the whole frame', 'ok');
   refreshCropPreviews();
 }
 
-async function refreshCropPreviews() {
+function refreshCropPreviews() {
   const wrap = document.getElementById('crop-previews');
-  const pc   = document.getElementById('crop-preview-closed');
-  const po   = document.getElementById('crop-preview-open');
-  const t    = Date.now();
-  pc.src = `/api/ref/closed/preview?t=${t}`;
-  po.src = `/api/ref/open/preview?t=${t}`;
-  pc.onerror = () => pc.closest('.crop-preview-item').style.display = 'none';
-  po.onerror = () => po.closest('.crop-preview-item').style.display = 'none';
+  const list = document.getElementById('crop-preview-list');
+  const t = Date.now();
+  const shown = areas.length ? areas : [{ name: 'Whole frame' }];
+  list.innerHTML = shown.map((a, i) => `
+    <div class="crop-preview-area">
+      <span class="crop-preview-title"><span class="area-swatch" style="background:${areaColor(i)}"></span>${escapeHtml(a.name)}</span>
+      <div class="crop-preview-pair">
+        ${['closed', 'open'].map(st => `
+        <div class="crop-preview-item">
+          <span>${st === 'closed' ? 'Closed' : 'Open'}</span>
+          <img src="/api/ref/${st}/preview?area=${i}&t=${t}" alt="${st} processed"
+               onerror="this.closest('.crop-preview-item').style.display='none'" />
+        </div>`).join('')}
+      </div>
+    </div>`).join('');
   wrap.classList.remove('hidden');
 }
 
@@ -475,6 +733,8 @@ async function loadSettings() {
   // The server never returns the stored password; blank means "keep it"
   form.elements.mqtt_password.placeholder =
     cfg.mqtt_password_set ? '•••••••• (unchanged — type to replace)' : '';
+  document.getElementById('snapshot-dir-note').textContent =
+    cfg.snapshot_dir ? ` Folder: ${cfg.snapshot_dir}` : '';
   llmMode = cfg.llm_mode || 'off';
   document.getElementById('ai-card').classList.toggle('hidden', llmMode === 'off');
   if (cfg.ssim_threshold) {
@@ -495,6 +755,7 @@ async function saveSettings(e) {
   Array.from(form.elements).forEach(el => {
     if (!el.name) return;
     if (el.name === 'mqtt_password' && !el.value) return;
+    if (el.name === 'snapshots_enabled') { cfg[el.name] = el.value === 'true'; return; }
     cfg[el.name] = (el.type === 'number') ? parseFloat(el.value) : el.value;
   });
   const res = await fetch('/api/settings', {
@@ -728,6 +989,12 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     img.src = `/api/ref/${state}.jpg?t=${Date.now()}`;
   });
+
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeEvent(); });
+  // Cropper re-lays itself out on resize; follow with the area outlines.
+  let resizeT;
+  window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(drawAreaOverlays, 150); });
+  window.addEventListener('beforeunload', e => { if (areasDirty) e.preventDefault(); });
 
   setInterval(() => {
     const el = document.getElementById('status-time');

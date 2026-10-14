@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 *.jpg
 data/
+snapshots/
+events.json
 config.json
 score_history.json
 .env
