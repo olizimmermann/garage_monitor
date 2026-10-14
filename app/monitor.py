@@ -310,13 +310,18 @@ class MonitorState:
             self.last_update = datetime.now(timezone.utc).isoformat()
             self.error = error
 
-    def record_score(self, ts: str, sc: float, so: float, limit: int) -> None:
-        """Append one confidence reading; flush to disk at most once a minute."""
+    def record_score(self, ts: str, readings: list[dict], limit: int) -> None:
+        """Append one confidence reading; flush to disk at most once a minute.
+        Top-level scores are the least confident area's; `areas` holds every
+        area compactly as [name, closed, open, threshold]."""
+        top = weakest(readings)
         with self._lock:
             self.score_history.append({
                 "ts": ts,
-                "score_closed": round(sc, 4),
-                "score_open": round(so, 4),
+                "score_closed": top["score_closed"],
+                "score_open": top["score_open"],
+                "areas": [[r["name"], r["score_closed"], r["score_open"], r["threshold"]]
+                          for r in readings],
             })
             if limit > 0:
                 self.score_history = self.score_history[-limit:]
@@ -536,8 +541,8 @@ def _run(stop: threading.Event) -> None:
                              retain=True)
                     published = new_state
 
-                monitor_state.record_score(monitor_state.last_update, top["score_closed"],
-                                           top["score_open"], cfg.score_history_size)
+                monitor_state.record_score(monitor_state.last_update, readings,
+                                           cfg.score_history_size)
             except Exception as e:
                 # One bad cycle (odd frame, bad crop, disk full…) must not kill
                 # monitoring; report it and try again next interval.

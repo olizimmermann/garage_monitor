@@ -27,47 +27,12 @@ function initChart() {
 
   chart = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels: [],
-      datasets: [
-        {
-          label: 'Closed',
-          data: [],
-          borderColor: '#22c55e',
-          backgroundColor: 'rgba(34,197,94,.08)',
-          fill: true,
-          tension: 0.35,
-          pointRadius: 2,
-          pointHoverRadius: 5,
-          borderWidth: 2,
-        },
-        {
-          label: 'Open',
-          data: [],
-          borderColor: '#f59e0b',
-          backgroundColor: 'rgba(245,158,11,.08)',
-          fill: true,
-          tension: 0.35,
-          pointRadius: 2,
-          pointHoverRadius: 5,
-          borderWidth: 2,
-        },
-        {
-          label: 'Threshold',
-          data: [],
-          borderColor: 'rgba(239,68,68,.55)',
-          borderDash: [5, 4],
-          borderWidth: 1.5,
-          pointRadius: 0,
-          fill: false,
-          tension: 0,
-        },
-      ],
-    },
+    data: { labels: [], datasets: [] },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
+      spanGaps: true,
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: {
@@ -101,11 +66,9 @@ function initChart() {
           titleColor: '#e8eaf0',
           bodyColor: '#9097b8',
           padding: 10,
+          filter: item => !item.dataset.isThreshold && item.parsed.y != null,
           callbacks: {
-            label: ctx => {
-              if (ctx.dataset.label === 'Threshold') return null;
-              return ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)}`;
-            },
+            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)}`,
           },
         },
       },
@@ -113,14 +76,82 @@ function initChart() {
   });
 }
 
+// Normalise a reading to {ts, areas: [{name, closed, open, threshold}]}.
+// Readings from before multi-area support only carry the top-level scores.
+function toScorePoint(ts, areas, sc, so) {
+  return {
+    ts,
+    areas: areas && areas.length
+      ? areas.map(a => Array.isArray(a)
+          ? { name: a[0], closed: a[1], open: a[2], threshold: a[3] }
+          : { name: a.name, closed: a.score_closed, open: a.score_open, threshold: a.threshold })
+      : [{ name: null, closed: sc, open: so, threshold: null }],
+  };
+}
+
+function lineStyle(color, dashed, fill) {
+  return {
+    borderColor: color,
+    backgroundColor: fill ? color + '14' : 'transparent',
+    fill,
+    borderDash: dashed ? [6, 4] : [],
+    tension: 0.35,
+    pointRadius: dashed ? 0 : 2,
+    pointHoverRadius: 5,
+    borderWidth: 2,
+  };
+}
+
+// One closed + one open line per area. A single area keeps the classic
+// green/amber look; several areas use their area colour (solid = closed,
+// dashed = open). Areas that didn't exist at a time are gaps (null).
 function redrawScoreChart() {
   if (!chart) return;
+  const latest = scorePoints.length ? scorePoints[scorePoints.length - 1].areas : [];
+  const names = latest.map(a => a.name);
+  // Legacy points (no per-area data) belong to the first current area.
+  const nameOf = n => n ?? names[0] ?? null;
+  const single = names.length <= 1;
+  const valueAt = (p, name, key) => {
+    const a = p.areas.find(x => nameOf(x.name) === name);
+    return a ? a[key] : null;
+  };
+
+  const datasets = [];
+  names.forEach((name, i) => {
+    const prefix = single ? '' : `${name} · `;
+    datasets.push({ label: prefix + 'Closed',
+      ...lineStyle(single ? '#22c55e' : areaColor(i), false, single),
+      data: scorePoints.map(p => valueAt(p, name, 'closed')) });
+    datasets.push({ label: prefix + 'Open',
+      ...lineStyle(single ? '#f59e0b' : areaColor(i), !single, single),
+      data: scorePoints.map(p => valueAt(p, name, 'open')) });
+  });
+  const thresholds = [...new Set(latest.map(a => a.threshold ?? chartThreshold))];
+  thresholds.forEach(t => datasets.push({
+    label: 'Threshold', isThreshold: true, data: scorePoints.map(() => t),
+    borderColor: 'rgba(239,68,68,.55)', borderDash: [5, 4], borderWidth: 1.5,
+    pointRadius: 0, fill: false, tension: 0,
+  }));
+
   chart.data.labels = scorePoints.map(p => formatTs(p.ts));
-  chart.data.datasets[0].data = scorePoints.map(p => p.closed);
-  chart.data.datasets[1].data = scorePoints.map(p => p.open);
-  chart.data.datasets[2].data = scorePoints.map(() => chartThreshold);
+  chart.data.datasets = datasets;
   chart.update('none');
+  renderChartLegend(names, single);
   if (scorePoints.length) document.getElementById('chart-empty').classList.add('hidden');
+}
+
+function renderChartLegend(names, single) {
+  const el = document.getElementById('chart-legend');
+  const key = names.join('\u0000');
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  const threshold = '<span class="legend-item"><span class="legend-dot" style="background:rgba(239,68,68,.6);border-radius:2px;width:14px;height:2px"></span>Threshold</span>';
+  el.innerHTML = single
+    ? '<span class="legend-item"><span class="legend-dot" style="background:var(--closed)"></span>Closed</span>' +
+      '<span class="legend-item"><span class="legend-dot" style="background:var(--open)"></span>Open</span>' + threshold
+    : names.map((n, i) => `<span class="legend-item"><span class="legend-dot" style="background:${areaColor(i)}"></span>${escapeHtml(n)}</span>`).join('') +
+      '<span class="legend-item legend-note">solid = closed · dashed = open</span>' + threshold;
 }
 
 // Seed the chart from the server's persisted history so it shows the last X
@@ -132,7 +163,7 @@ async function loadScoreHistory() {
     const data = await res.json();
     scorePoints.length = 0;
     (data.scores || []).forEach(p =>
-      scorePoints.push({ ts: p.ts, closed: p.score_closed, open: p.score_open }));
+      scorePoints.push(toScorePoint(p.ts, p.areas, p.score_closed, p.score_open)));
     redrawScoreChart();
   } catch (_) {}
 }
@@ -144,7 +175,7 @@ function updateScoreChart(s) {
   const last = scorePoints[scorePoints.length - 1];
   if (last && last.ts === s.last_update) return;
 
-  scorePoints.push({ ts: s.last_update, closed: s.score_closed, open: s.score_open });
+  scorePoints.push(toScorePoint(s.last_update, s.areas, s.score_closed, s.score_open));
   if (MAX_CHART_POINTS > 0)
     while (scorePoints.length > MAX_CHART_POINTS) scorePoints.shift();
 

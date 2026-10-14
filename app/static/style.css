@@ -657,7 +657,8 @@ input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px 
 .chart-card .card-header { margin-bottom: 10px; }
 .chart-card .card-title  { margin-bottom: 0; }
 .chart-wrap { position: relative; height: 180px; }
-.chart-legend { display: flex; gap: 16px; align-items: center; }
+.chart-legend { display: flex; gap: 6px 16px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.legend-note  { font-style: italic; }
 .legend-item  { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-3); }
 .legend-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .chart-empty  {
