@@ -37,6 +37,9 @@ _PROMPT = (
     "This is a security camera image from inside a garage. Look at the large "
     "garage door. Is it open (you can see outside: daylight, street, trees, cars, "
     "or a gap between door and floor) or closed (solid door panels, no view outside)? "
+    # Without this, models read a half-raised door (outside visible only below
+    # the lowest panel) as closed.
+    "A door that is only partly raised counts as open. "
     'Respond only with JSON: {"state": "open" or "closed", "confidence": 0.0-1.0, '
     '"reason": "one short sentence"}'
 )
